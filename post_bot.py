@@ -1,33 +1,29 @@
 #!/usr/bin/env python3
 """
-post_bot.py  — Carousel edition (3 slides)
--------------------------------------------
-Slide 1: Foto Unsplash + título  (hero)
-Slide 2: Factos-chave            (facts card)
-Slide 3: Impacto + CTA           (impact card)
+post_bot.py  — @wealth style carousel
+--------------------------------------
+Slide 1 : Foto principal + headline dourada enorme
+Slides 2+: Uma foto por item + nome dourado + detalhe branco
 """
 
-import io
-import os
-import json
-import base64
-import logging
-import xml.etree.ElementTree as ET
+import io, os, re, json, base64, logging, xml.etree.ElementTree as ET
 from datetime import datetime
 from pathlib import Path
 
-import anthropic
-import requests
+import anthropic, requests
 from PIL import Image, ImageDraw, ImageFont
 
-# ─── Configuração ─────────────────────────────────────────────────────────────
+# ─── Config ───────────────────────────────────────────────────────────────────
 
 ANTHROPIC_API_KEY   = os.getenv("ANTHROPIC_API_KEY", "")
 UNSPLASH_ACCESS_KEY = os.getenv("UNSPLASH_ACCESS_KEY", "XJWduaYYGKbMDEYFMfKa9EaGxcLN-_KkOlGPahK5x5A")
 IMGBB_API_KEY       = "44c06dbe6a657fdfd3ac4b3b97164db6"
 WEBHOOK_URL         = "https://hook.eu1.make.com/u3ci4y1uxw85edmxrd6li2qdjwu6mnst"
+LOG_FILE            = "publications.json"
 
-LOG_FILE = "publications.json"
+GOLD  = (255, 200,   0)
+WHITE = (255, 255, 255)
+BLACK = (  0,   0,   0)
 
 # ─── Logging ──────────────────────────────────────────────────────────────────
 
@@ -41,99 +37,195 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
-# ─── Palettes ─────────────────────────────────────────────────────────────────
+# ─── Fonts ────────────────────────────────────────────────────────────────────
 
-BADGE_COLORS = {
-    "Science":     (52,  152, 219),
-    "Environment": (39,  174,  96),
-    "Health":      (231,  76,  60),
-    "Society":     (155,  89, 182),
-    "Tech":        (243, 156,  18),
-    "Animals":     ( 26, 188, 156),
-    "default":     ( 52,  73,  94),
-}
+def _impact(size: int) -> ImageFont.FreeTypeFont:
+    """Tenta carregar Impact (ideal) ou fallback bold."""
+    for path in ["C:/Windows/Fonts/impact.ttf", "impact.ttf",
+                 "arialbd.ttf", "Arial Bold.ttf", "DejaVuSans-Bold.ttf"]:
+        try:
+            return ImageFont.truetype(path, size)
+        except (IOError, OSError):
+            pass
+    return ImageFont.load_default()
 
-UNSPLASH_KEYWORDS = {
-    "Science":     "science discovery research",
-    "Environment": "nature forest earth",
-    "Health":      "health wellness vitality",
-    "Society":     "community people hope",
-    "Tech":        "technology innovation future",
-    "Animals":     "wildlife animals nature",
-    "default":     "inspiration positive light",
-}
+def _regular(size: int) -> ImageFont.FreeTypeFont:
+    for path in ["arial.ttf", "Arial.ttf", "DejaVuSans.ttf", "Ubuntu.ttf"]:
+        try:
+            return ImageFont.truetype(path, size)
+        except (IOError, OSError):
+            pass
+    return ImageFont.load_default()
 
-GRADIENT_FALLBACK = {
-    "Science":     ((8,  8,  45),   (20, 20, 110)),
-    "Environment": ((5,  35, 12),   (12, 80,  32)),
-    "Health":      ((35,  5, 35),   (90, 20,  90)),
-    "Society":     ((8,  20, 45),   (25, 60, 110)),
-    "Tech":        ((5,   5, 35),   (15, 15,  90)),
-    "Animals":     ((35, 15,  5),   (90, 45,  12)),
-    "default":     ((10, 10, 35),   (30, 30,  90)),
-}
+# ─── Text helpers ──────────────────────────────────────────────────────────────
 
-# ─── 1. Google News trending ──────────────────────────────────────────────────
+def _tw(draw, text, font):
+    bb = draw.textbbox((0, 0), text, font=font)
+    return bb[2] - bb[0]
 
-def fetch_trending_news() -> list:
-    url  = "https://news.google.com/rss?hl=en-US&gl=US&ceid=US:en"
-    resp = requests.get(url, timeout=15, headers={"User-Agent": "Mozilla/5.0"})
-    resp.raise_for_status()
-    root  = ET.fromstring(resp.content)
-    items = []
-    for item in root.findall(".//item")[:20]:
-        title = item.findtext("title", "").strip()
-        if title:
-            items.append(title)
-    log.info(f"Google News: {len(items)} headlines")
-    return items
+def _th(draw, text, font):
+    bb = draw.textbbox((0, 0), text, font=font)
+    return bb[3] - bb[1]
 
+def _wrap(text, font, draw, max_w):
+    words, lines, cur = text.split(), [], ""
+    for w in words:
+        test = f"{cur} {w}".strip()
+        if draw.textbbox((0, 0), test, font=font)[2] <= max_w:
+            cur = test
+        else:
+            if cur:
+                lines.append(cur)
+            cur = w
+    if cur:
+        lines.append(cur)
+    return lines
 
-# ─── 2. Claude gera conteúdo para 3 slides ────────────────────────────────────
+def _shadow_text(draw, x, y, text, font, fill=GOLD, shadow=4):
+    """Texto com sombra preta para contraste máximo."""
+    for dx in range(-shadow, shadow + 1):
+        for dy in range(-shadow, shadow + 1):
+            if dx != 0 or dy != 0:
+                draw.text((x + dx, y + dy), text, font=font, fill=BLACK)
+    draw.text((x, y), text, font=font, fill=fill)
+
+def _centered_shadow(draw, y, text, font, fill=GOLD, shadow=4, W=1080):
+    w = _tw(draw, text, font)
+    _shadow_text(draw, (W - w) // 2, y, text, font, fill, shadow)
+    return _th(draw, text, font)
+
+# ─── Bottom gradient overlay ───────────────────────────────────────────────────
+
+def _apply_bottom_gradient(img: Image.Image, start_pct=0.42) -> Image.Image:
+    """Gradiente preto de baixo para cima — deixa a foto visível no topo."""
+    W, H = img.size
+    overlay = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    od = ImageDraw.Draw(overlay)
+    start_y = int(H * start_pct)
+    for y in range(start_y, H):
+        t = (y - start_y) / (H - start_y)
+        alpha = int(min(255, t ** 0.55 * 290))
+        od.line([(0, y), (W, y)], fill=(0, 0, 0, alpha))
+    out = img.convert("RGBA")
+    out.alpha_composite(overlay)
+    return out.convert("RGB")
+
+# ─── Brand bar ────────────────────────────────────────────────────────────────
+
+def _draw_brand(draw, y, W=1080, margin=60):
+    """● POSITIVE PULSE ● com linhas douradas — estilo @wealth."""
+    bf   = _regular(26)
+    txt  = "POSITIVE PULSE"
+    tw   = _tw(draw, txt, bf)
+    cx   = W // 2
+
+    # Dot + text + dot
+    dot  = "●"
+    dw   = _tw(draw, dot, bf)
+    full = f"{dot}  {txt}  {dot}"
+    fw   = _tw(draw, full, bf)
+
+    # Linhas de cada lado
+    line_end   = cx - fw // 2 - 18
+    line_start = margin
+    if line_end > line_start:
+        draw.rectangle([(line_start, y + 10), (line_end, y + 12)], fill=GOLD)
+    draw.text((cx - fw // 2, y), full, font=bf, fill=GOLD)
+    line2_start = cx + fw // 2 + 18
+    if line2_start < W - margin:
+        draw.rectangle([(line2_start, y + 10), (W - margin, y + 12)], fill=GOLD)
+
+# ─── Unsplash ─────────────────────────────────────────────────────────────────
+
+def _crop_square(img: Image.Image, size=1080) -> Image.Image:
+    w, h = img.size
+    s    = min(w, h)
+    l    = (w - s) // 2
+    t    = (h - s) // 2
+    return img.crop((l, t, l + s, t + s)).resize((size, size), Image.LANCZOS)
+
+def fetch_photo(search_term: str) -> Image.Image | None:
+    if UNSPLASH_ACCESS_KEY:
+        for query in [search_term, search_term.split()[0]]:
+            try:
+                r = requests.get(
+                    "https://api.unsplash.com/photos/random",
+                    params={"query": query, "client_id": UNSPLASH_ACCESS_KEY},
+                    timeout=15,
+                )
+                d = r.json()
+                if r.ok and "urls" in d:
+                    img_data = requests.get(d["urls"]["regular"], timeout=30).content
+                    log.info(f"Unsplash OK: {query}")
+                    return _crop_square(Image.open(io.BytesIO(img_data)).convert("RGB"))
+            except Exception as e:
+                log.warning(f"Unsplash '{query}': {e}")
+    # fallback gradiente
+    img  = Image.new("RGB", (1080, 1080), (15, 15, 25))
+    draw = ImageDraw.Draw(img)
+    for y in range(1080):
+        t = y / 1080
+        draw.line([(0, y), (1080, y)], fill=(int(10 + 20*t), int(10 + 15*t), int(25 + 35*t)))
+    return img
+
+# ─── 1. Google News ───────────────────────────────────────────────────────────
+
+def fetch_trending() -> list:
+    try:
+        r = requests.get("https://news.google.com/rss?hl=en-US&gl=US&ceid=US:en",
+                         timeout=15, headers={"User-Agent": "Mozilla/5.0"})
+        root = ET.fromstring(r.content)
+        items = [i.findtext("title", "").strip() for i in root.findall(".//item")[:20]]
+        log.info(f"Google News: {len(items)} headlines")
+        return [i for i in items if i]
+    except Exception as e:
+        log.warning(f"RSS falhou: {e}")
+        return []
+
+# ─── 2. Claude — gera lista de itens ──────────────────────────────────────────
 
 def generate_post() -> dict:
-    try:
-        trending = fetch_trending_news()
-    except Exception as e:
-        log.warning(f"RSS falhou ({e})")
-        trending = []
-
-    news_section = ""
+    trending = fetch_trending()
+    news_block = ""
     if trending:
-        news_section = (
-            "Here are today's most viewed news headlines worldwide:\n\n"
+        news_block = (
+            "Today's trending headlines:\n"
             + "\n".join(f"{i+1}. {t}" for i, t in enumerate(trending))
-            + "\n\nPick the ONE most positive, uplifting or inspiring story "
-              "(or find a positive angle on one of them).\n\n"
+            + "\n\n"
         )
 
     prompt = (
-        "You are a positive news editor for an Instagram account called Positive Pulse.\n\n"
-        + news_section
-        + "Create an Instagram post about a positive news story.\n\n"
-        "IMPORTANT: Decide if this story deserves a CAROUSEL (3 slides) or a SINGLE photo post:\n"
-        "- Use CAROUSEL when the story has multiple interesting facts, data, or angles to explore\n"
-        "- Use SINGLE when it's a simple, feel-good story best told with one powerful image\n\n"
-        "Return ONLY a valid JSON object with these exact fields:\n"
-        "  post_type   : either 'carousel' or 'single'\n"
-        "  headline    : punchy headline, max 8 words, ALL CAPS\n"
-        "  subtitle    : one sentence expanding it, max 18 words\n"
-        "  facts       : array of exactly 3 short facts (each max 12 words, start with an emoji) "
-                        "— required even for single posts, leave as empty array [] if truly no facts\n"
-        "  impact      : one powerful impact statement, max 15 words, ALL CAPS "
-                        "(used in slide 3 of carousel, or ignored for single)\n"
-        "  cta         : call-to-action, max 10 words (e.g. 'Follow for more good news every day!')\n"
-        "  caption     : Instagram caption, 2-3 sentences, ends with call-to-action\n"
-        "  hashtags    : array of 25 relevant hashtags (strings starting with #)\n"
-        "  category    : one of [Science, Environment, Health, Society, Tech, Animals]\n"
-        "  search_term : 2-3 english words to find a relevant photo\n\n"
-        "No markdown, no extra text — only the JSON object."
+        "You create viral Instagram carousel posts for Positive Pulse — a positive news account.\n\n"
+        + news_block
+        + "Create a LIST-based carousel post in the style of @wealth on Instagram.\n"
+        "Format: a ranked or themed list (e.g. 'TOP 5 SCIENTISTS CHANGING THE WORLD', "
+        "'THE MOST INSPIRING COUNTRIES RIGHT NOW', 'DISCOVERIES THAT WILL CHANGE YOUR LIFE').\n\n"
+        "Rules:\n"
+        "- Topic MUST be positive, uplifting, inspiring or fascinating\n"
+        "- List MUST have exactly 4 items\n"
+        "- Each item needs its own Unsplash photo search term\n"
+        "- Headlines and names must be SHORT and PUNCHY (max 5 words each)\n"
+        "- Names should be ALL CAPS\n\n"
+        "Return ONLY valid JSON:\n"
+        "{\n"
+        '  "topic": "THE MOST INSPIRING SCIENTISTS ALIVE TODAY",\n'
+        '  "search_term": "science laboratory discovery",\n'
+        '  "items": [\n'
+        '    {"name": "JANE GOODALL", "detail": "50 YEARS SAVING WILDLIFE", "search": "wildlife chimpanzee jungle africa"},\n'
+        '    {"name": "ELON MUSK", "detail": "MAKING HUMANS MULTIPLANETARY", "search": "rocket space launch"},\n'
+        '    {"name": "KATALIN KARIKO", "detail": "MRNA SAVES MILLIONS OF LIVES", "search": "medical laboratory vaccine"},\n'
+        '    {"name": "DEMIS HASSABIS", "detail": "AI SOLVES 50-YEAR OLD PROBLEM", "search": "artificial intelligence research"}\n'
+        "  ],\n"
+        '  "caption": "Instagram caption 2-3 sentences with call to action",\n'
+        '  "hashtags": ["#positivenews", "#inspiring", ...] (25 hashtags)\n'
+        "}\n\n"
+        "No markdown, no extra text — only the JSON."
     )
 
     client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
     msg = client.messages.create(
         model="claude-sonnet-4-6",
-        max_tokens=900,
+        max_tokens=1000,
         messages=[{"role": "user", "content": prompt}],
     )
     raw = msg.content[0].text.strip()
@@ -142,487 +234,137 @@ def generate_post() -> dict:
         if raw.startswith("json"):
             raw = raw[4:]
     data = json.loads(raw.strip())
-    log.info(f"Headline  : {data['headline']}")
-    log.info(f"Category  : {data['category']}")
-    log.info(f"Post type : {data.get('post_type', 'single')}")
-    log.info(f"Facts     : {data.get('facts', [])}")
+    log.info(f"Topic  : {data['topic']}")
+    log.info(f"Items  : {[i['name'] for i in data['items']]}")
     return data
 
+# ─── 3. SLIDE 1 — Hero (foto + headline) ──────────────────────────────────────
 
-# ─── 3. Unsplash background ───────────────────────────────────────────────────
+def create_slide1(post: dict, bg: Image.Image) -> str:
+    W = H = 1080
+    margin = 55
 
-def _crop_center(img: Image.Image, size=(1080, 1080)) -> Image.Image:
-    w, h  = img.size
-    side  = min(w, h)
-    left  = (w - side) // 2
-    top   = (h - side) // 2
-    return img.crop((left, top, left + side, top + side)).resize(size, Image.LANCZOS)
-
-
-def fetch_background(post: dict) -> Image.Image | None:
-    search   = post.get("search_term") or UNSPLASH_KEYWORDS.get(post.get("category", "default"), "nature")
-    fallback = UNSPLASH_KEYWORDS.get(post.get("category", "default"), "nature").split()[0]
-
-    if UNSPLASH_ACCESS_KEY:
-        for query in [search, fallback]:
-            try:
-                resp = requests.get(
-                    "https://api.unsplash.com/photos/random",
-                    params={"query": query, "client_id": UNSPLASH_ACCESS_KEY},
-                    timeout=15,
-                )
-                data = resp.json()
-                if resp.ok and "urls" in data:
-                    img_data = requests.get(data["urls"]["regular"], timeout=30).content
-                    img = Image.open(io.BytesIO(img_data)).convert("RGB")
-                    log.info(f"Unsplash OK (query: {query})")
-                    return _crop_center(img)
-            except Exception as e:
-                log.warning(f"Unsplash '{query}': {type(e).__name__}")
-
-    try:
-        url  = f"https://source.unsplash.com/featured/1080x1080/?{search.split()[0]}"
-        resp = requests.get(url, timeout=20, allow_redirects=True)
-        if resp.ok and "image" in resp.headers.get("content-type", ""):
-            img = Image.open(io.BytesIO(resp.content)).convert("RGB")
-            log.info("Unsplash source OK")
-            return _crop_center(img)
-    except Exception as e:
-        log.warning(f"Unsplash source: {e}")
-
-    log.warning("Sem foto — usando gradiente")
-    return None
-
-
-def _gradient_bg(category: str, size=(1080, 1080)) -> Image.Image:
-    top_c, bot_c = GRADIENT_FALLBACK.get(category, GRADIENT_FALLBACK["default"])
-    img  = Image.new("RGB", size)
+    img  = _apply_bottom_gradient(bg, start_pct=0.38)
     draw = ImageDraw.Draw(img)
-    for y in range(size[1]):
-        t = y / size[1]
-        c = tuple(int(top_c[i] + (bot_c[i] - top_c[i]) * t) for i in range(3))
-        draw.line([(0, y), (size[0], y)], fill=c)
-    return img
 
-
-# ─── 4. Fonts & helpers ───────────────────────────────────────────────────────
-
-def _font(size: int, bold: bool = True) -> ImageFont.FreeTypeFont:
-    bold_list = ["arialbd.ttf", "Arial Bold.ttf", "DejaVuSans-Bold.ttf",
-                 "Ubuntu-Bold.ttf", "LiberationSans-Bold.ttf"]
-    reg_list  = ["arial.ttf", "Arial.ttf", "DejaVuSans.ttf",
-                 "Ubuntu.ttf", "LiberationSans-Regular.ttf"]
-    for name in (bold_list if bold else reg_list):
-        try:
-            return ImageFont.truetype(name, size)
-        except (IOError, OSError):
-            pass
-    return ImageFont.load_default()
-
-
-def _wrap(text: str, font, draw, max_w: int) -> list:
-    words, lines, cur = text.split(), [], ""
-    for word in words:
-        test = f"{cur} {word}".strip()
-        if draw.textbbox((0, 0), test, font=font)[2] <= max_w:
-            cur = test
-        else:
-            if cur:
-                lines.append(cur)
-            cur = word
-    if cur:
-        lines.append(cur)
-    return lines
-
-
-def _text_h(draw, text: str, font) -> int:
-    bb = draw.textbbox((0, 0), text, font=font)
-    return bb[3] - bb[1]
-
-
-def _text_w(draw, text: str, font) -> int:
-    bb = draw.textbbox((0, 0), text, font=font)
-    return bb[2] - bb[0]
-
-
-# ─── 5. SLIDE 1 — Hero (foto + título) ───────────────────────────────────────
-
-def create_slide1(post: dict, bg: Image.Image | None) -> str:
-    W, H     = 1080, 1080
-    margin   = 60
-    SPLIT    = 560
-    category = post.get("category", "default")
-    color    = BADGE_COLORS.get(category, BADGE_COLORS["default"])
-
-    bg_img = bg or _gradient_bg(category)
-    result = Image.new("RGB", (W, H), (12, 12, 18))
-
-    # Foto com fade
-    photo_area = bg_img.crop((0, 0, W, SPLIT)).convert("RGBA")
-    fade = Image.new("RGBA", (W, SPLIT), (0, 0, 0, 0))
-    fd   = ImageDraw.Draw(fade)
-    for y in range(SPLIT - 150, SPLIT):
-        t     = (y - (SPLIT - 150)) / 150
-        alpha = int(t ** 0.6 * 255)
-        fd.line([(0, y), (W, y)], fill=(12, 12, 18, alpha))
-    photo_area.alpha_composite(fade)
-    result.paste(photo_area.convert("RGB"), (0, 0))
-
-    draw = ImageDraw.Draw(result)
-
-    # Linha colorida
-    draw.rectangle([(0, SPLIT - 4), (W, SPLIT + 4)], fill=color)
-
-    # Badge categoria
-    bf  = _font(28, bold=True)
-    bb  = draw.textbbox((0, 0), category.upper(), font=bf)
-    bw  = bb[2] - bb[0] + 30
-    bh  = bb[3] - bb[1] + 22
-    bx, by = margin, SPLIT - bh // 2 - 6
-
-    result_rgba = result.convert("RGBA")
-    lay = Image.new("RGBA", (W, H), (0, 0, 0, 0))
-    ld  = ImageDraw.Draw(lay)
-    try:
-        ld.rounded_rectangle([(bx, by), (bx + bw, by + bh)], radius=bh // 2, fill=(*color, 255))
-    except AttributeError:
-        ld.rectangle([(bx, by), (bx + bw, by + bh)], fill=(*color, 255))
-    result_rgba.alpha_composite(lay)
-    result = result_rgba.convert("RGB")
-    draw   = ImageDraw.Draw(result)
-    draw.text((bx + 15, by + 10), category.upper(), font=bf, fill=(255, 255, 255))
-
-    # Brand topo direito
-    ppf = _font(24, bold=True)
-    ppw = _text_w(draw, "POSITIVE PULSE", ppf)
-    draw.ellipse([(W - margin - ppw - 14, 46), (W - margin - ppw - 4, 56)], fill=color)
-    draw.text((W - margin - ppw, 42), "POSITIVE PULSE", font=ppf, fill=(240, 240, 240))
-
-    # Slide counter "1 / 3" topo esquerdo
-    cf = _font(22, bold=False)
-    draw.text((margin, 42), "1 / 3", font=cf, fill=(180, 180, 180))
-
-    # Headline
-    hf    = _font(80, bold=True)
-    lines = _wrap(post["headline"].upper(), hf, draw, W - 2 * margin)
-    y     = SPLIT + 38
-    for line in lines[:3]:
-        draw.text((margin, y), line, font=hf, fill=(255, 255, 255))
-        y += _text_h(draw, line, hf) + 8
-
-    # Accent line
-    y += 14
-    draw.rectangle([(margin, y), (margin + 60, y + 3)], fill=color)
-    y += 22
-
-    # Subtítulo
-    sf        = _font(36, bold=False)
-    sub_lines = _wrap(post.get("subtitle", ""), sf, draw, W - 2 * margin)
-    for line in sub_lines[:2]:
-        if y + _text_h(draw, line, sf) > H - 75:
+    # ── Headline dourada em Impact ──────────────────────────────────────────
+    topic = post["topic"].upper()
+    # Tamanho adaptativo
+    for size in [105, 90, 78, 66, 56]:
+        f     = _impact(size)
+        lines = _wrap(topic, f, draw, W - 2 * margin)
+        if len(lines) <= 3:
             break
-        draw.text((margin, y), line, font=sf, fill=(175, 178, 190))
-        y += _text_h(draw, line, sf) + 6
 
-    # Rodapé
-    ff       = _font(24, bold=False)
-    date_str = datetime.now().strftime("%B %d, %Y").upper()
-    draw.text((margin, H - 52), date_str, font=ff, fill=(95, 95, 112))
-    lf  = _font(24, bold=True)
-    lw  = _text_w(draw, "POSITIVE PULSE", lf)
-    draw.text((W - margin - lw, H - 52), "POSITIVE PULSE", font=lf, fill=color)
+    line_h = _th(draw, "A", f) + 10
+    total  = len(lines) * line_h
+    y      = H - total - 95   # posição do texto (acima do brand)
+
+    for line in lines:
+        _centered_shadow(draw, y, line, f, fill=GOLD, shadow=5, W=W)
+        y += line_h
+
+    # ── Brand ──────────────────────────────────────────────────────────────
+    _draw_brand(draw, H - 68, W=W, margin=margin)
+
+    # ── Slide counter ──────────────────────────────────────────────────────
+    cf = _regular(24)
+    draw.text((margin, 36), f"1 / {len(post['items']) + 1}", font=cf, fill=(200, 200, 200))
 
     path = "slide1.jpg"
-    result.save(path, "JPEG", quality=95)
-    log.info(f"Slide 1 criado -> {path}")
-    return path
-
-
-# ─── helpers ──────────────────────────────────────────────────────────────────
-
-import re
-
-def _strip_emoji(text: str) -> str:
-    """Remove emojis que Pillow nao consegue renderizar."""
-    return re.sub(r'[^\x00-\x7FÀ-ɏḀ-ỿ]+', '', text).strip()
-
-
-def _dark_photo_bg(bg: Image.Image | None, category: str,
-                   overlay_alpha: int = 210) -> Image.Image:
-    """Foto com overlay muito escuro para slides 2 e 3."""
-    W, H = 1080, 1080
-    base = (bg or _gradient_bg(category)).copy()
-    overlay = Image.new("RGBA", (W, H), (8, 8, 14, overlay_alpha))
-    out = base.convert("RGBA")
-    out.alpha_composite(overlay)
-    return out.convert("RGB")
-
-
-# ─── 6. SLIDE 2 — Key Facts (redesign) ───────────────────────────────────────
-
-def create_slide2(post: dict, bg: Image.Image | None = None) -> str:
-    W, H     = 1080, 1080
-    margin   = 70
-    category = post.get("category", "default")
-    color    = BADGE_COLORS.get(category, BADGE_COLORS["default"])
-    facts    = post.get("facts", ["No facts available"] * 3)
-
-    img  = _dark_photo_bg(bg, category, overlay_alpha=215)
-    draw = ImageDraw.Draw(img)
-
-    # Barra colorida no topo
-    draw.rectangle([(0, 0), (W, 6)], fill=color)
-
-    # Slide counter
-    cf = _font(22, bold=False)
-    draw.text((margin, 32), "2 / 3", font=cf, fill=(160, 160, 175))
-
-    # Brand topo direito
-    ppf = _font(24, bold=True)
-    ppw = _text_w(draw, "POSITIVE PULSE", ppf)
-    draw.text((W - margin - ppw, 28), "POSITIVE PULSE", font=ppf, fill=color)
-
-    # Secção "KEY FACTS" — centrada
-    tf  = _font(34, bold=True)
-    tw  = _text_w(draw, "KEY FACTS", tf)
-    draw.text(((W - tw) // 2, 100), "KEY FACTS", font=tf, fill=color)
-    lw2 = 80
-    draw.rectangle([((W - lw2) // 2, 148), ((W + lw2) // 2, 151)], fill=color)
-
-    # Headline
-    hf    = _font(46, bold=True)
-    lines = _wrap(post["headline"].upper(), hf, draw, W - 2 * margin)
-    y     = 180
-    for line in lines[:2]:
-        draw.text((margin, y), line, font=hf, fill=(245, 245, 255))
-        y += _text_h(draw, line, hf) + 8
-    y += 36
-
-    # 3 factos sem emoji — layout limpo com número colorido
-    fact_font = _font(32, bold=False)
-    num_font  = _font(36, bold=True)
-    card_pad  = 22
-    gap       = 24
-    num_box   = 58
-
-    for i, fact in enumerate(facts[:3]):
-        clean = _strip_emoji(fact)
-        if not clean:
-            clean = fact  # fallback sem strip
-
-        # Calcular altura do card
-        fact_lines = _wrap(clean, fact_font, draw, W - 2 * margin - num_box - 28)
-        card_h = max(num_box + 16, len(fact_lines) * (_text_h(draw, "A", fact_font) + 6) + 2 * card_pad)
-        fx, fy = margin, y
-
-        # Card background
-        rgba = img.convert("RGBA")
-        lay  = Image.new("RGBA", (W, H), (0, 0, 0, 0))
-        ld   = ImageDraw.Draw(lay)
-        try:
-            ld.rounded_rectangle([(fx, fy), (W - margin, fy + card_h)],
-                                  radius=14, fill=(*color, 22), outline=(*color, 90), width=2)
-        except TypeError:
-            ld.rectangle([(fx, fy), (W - margin, fy + card_h)], fill=(*color, 22))
-        rgba.alpha_composite(lay)
-        img  = rgba.convert("RGB")
-        draw = ImageDraw.Draw(img)
-
-        # Número em caixa colorida
-        nx   = fx + card_pad
-        ny   = fy + (card_h - num_box) // 2
-        try:
-            draw.rounded_rectangle([(nx, ny), (nx + num_box, ny + num_box)],
-                                    radius=10, fill=color)
-        except TypeError:
-            draw.rectangle([(nx, ny), (nx + num_box, ny + num_box)], fill=color)
-        num_str = str(i + 1)
-        nw      = _text_w(draw, num_str, num_font)
-        nh      = _text_h(draw, num_str, num_font)
-        draw.text((nx + (num_box - nw) // 2, ny + (num_box - nh) // 2),
-                  num_str, font=num_font, fill=(255, 255, 255))
-
-        # Texto do facto
-        tx = nx + num_box + 18
-        ty = fy + card_pad
-        for line in fact_lines[:3]:
-            draw.text((tx, ty), line, font=fact_font, fill=(220, 220, 235))
-            ty += _text_h(draw, line, fact_font) + 6
-
-        y += card_h + gap
-
-    # Rodapé
-    ff  = _font(22, bold=False)
-    ds  = datetime.now().strftime("%B %d, %Y").upper()
-    draw.text((margin, H - 44), ds, font=ff, fill=(80, 80, 100))
-    lf  = _font(22, bold=True)
-    lw  = _text_w(draw, "POSITIVE PULSE", lf)
-    draw.text((W - margin - lw, H - 44), "POSITIVE PULSE", font=lf, fill=color)
-    draw.rectangle([(0, H - 6), (W, H)], fill=color)
-
-    path = "slide2.jpg"
     img.save(path, "JPEG", quality=95)
-    log.info(f"Slide 2 criado -> {path}")
+    log.info("Slide 1 criado")
     return path
 
+# ─── 4. SLIDE ITEM — foto + nome dourado + detalhe ────────────────────────────
 
-# ─── 7. SLIDE 3 — Impact + CTA (redesign) ────────────────────────────────────
+def create_item_slide(item: dict, idx: int, total: int, bg: Image.Image) -> str:
+    W = H = 1080
+    margin = 55
 
-def create_slide3(post: dict, bg: Image.Image | None = None) -> str:
-    W, H     = 1080, 1080
-    margin   = 80
-    category = post.get("category", "default")
-    color    = BADGE_COLORS.get(category, BADGE_COLORS["default"])
-    impact   = _strip_emoji(post.get("impact", post["headline"])) or post.get("impact", post["headline"])
-    cta      = post.get("cta", "Follow for more good news every day!")
-
-    img  = _dark_photo_bg(bg, category, overlay_alpha=200)
+    img  = _apply_bottom_gradient(bg, start_pct=0.45)
     draw = ImageDraw.Draw(img)
 
-    # Barra colorida topo
-    draw.rectangle([(0, 0), (W, 6)], fill=color)
+    # ── Nome (grande, dourado) ──────────────────────────────────────────────
+    name = item["name"].upper()
+    for size in [115, 98, 84, 70, 58]:
+        nf    = _impact(size)
+        lines = _wrap(name, nf, draw, W - 2 * margin)
+        if len(lines) <= 2:
+            break
 
-    # Slide counter
-    cf = _font(22, bold=False)
-    draw.text((margin, 32), "3 / 3", font=cf, fill=(160, 160, 175))
+    detail_f  = _impact(62)
+    detail_h  = _th(draw, "A", detail_f) + 8
+    name_h    = _th(draw, "A", nf) + 10
+    total_h   = len(lines) * name_h + detail_h + 16
 
-    # Brand topo direito
-    ppf = _font(24, bold=True)
-    ppw = _text_w(draw, "POSITIVE PULSE", ppf)
-    draw.text((W - margin - ppw, 28), "POSITIVE PULSE", font=ppf, fill=color)
+    y = H - total_h - 72   # espaço para brand
 
-    # Label "THE IMPACT" centrada
-    tf  = _font(30, bold=True)
-    lbl = "THE IMPACT"
-    tw  = _text_w(draw, lbl, tf)
-    draw.text(((W - tw) // 2, 108), lbl, font=tf, fill=color)
-    draw.rectangle([((W - 60) // 2, 152), ((W + 60) // 2, 155)], fill=color)
+    for line in lines:
+        _centered_shadow(draw, y, line, nf, fill=GOLD, shadow=5, W=W)
+        y += name_h
 
-    # Linha separadora horizontal
-    draw.rectangle([(margin, 190), (W - margin, 192)], fill=(60, 60, 80))
+    # ── Detalhe (branco, menor) ─────────────────────────────────────────────
+    y += 8
+    _centered_shadow(draw, y, item["detail"].upper(), detail_f,
+                     fill=WHITE, shadow=4, W=W)
 
-    # Impact statement — grande, centrado, multi-linha
-    if_font  = _font(72, bold=True)
-    ilines   = _wrap(impact.upper(), if_font, draw, W - 2 * margin)
-    line_h   = _text_h(draw, "A", if_font) + 16
-    total_h  = line_h * min(len(ilines), 4)
-    start_y  = 230 + (H - 230 - 300 - total_h) // 2   # centrar verticalmente
+    # ── Brand ──────────────────────────────────────────────────────────────
+    _draw_brand(draw, H - 58, W=W, margin=margin)
 
-    for line in ilines[:4]:
-        lw3 = _text_w(draw, line, if_font)
-        # Sombra suave
-        draw.text(((W - lw3) // 2 + 3, start_y + 3), line, font=if_font, fill=(0, 0, 0))
-        draw.text(((W - lw3) // 2, start_y), line, font=if_font, fill=(255, 255, 255))
-        start_y += line_h
+    # ── Slide counter ──────────────────────────────────────────────────────
+    cf = _regular(24)
+    draw.text((margin, 36), f"{idx + 2} / {total + 1}", font=cf, fill=(200, 200, 200))
 
-    # Linha decorativa pós-impact
-    sep_y = start_y + 30
-    draw.rectangle([(margin + 80, sep_y), (W - margin - 80, sep_y + 3)], fill=color)
-
-    # CTA
-    ctaf = _font(34, bold=False)
-    ctaw = _text_w(draw, cta, ctaf)
-    if ctaw > W - 2 * margin:
-        # quebrar em 2 linhas
-        cta_lines = _wrap(cta, ctaf, draw, W - 2 * margin)
-        cy = sep_y + 22
-        for cl in cta_lines[:2]:
-            clw = _text_w(draw, cl, ctaf)
-            draw.text(((W - clw) // 2, cy), cl, font=ctaf, fill=(200, 205, 220))
-            cy += _text_h(draw, cl, ctaf) + 6
-        pill_y = cy + 30
-    else:
-        draw.text(((W - ctaw) // 2, sep_y + 22), cta, font=ctaf, fill=(200, 205, 220))
-        pill_y = sep_y + 22 + _text_h(draw, cta, ctaf) + 40
-
-    # Pílula POSITIVE PULSE
-    pill_w, pill_h = 320, 68
-    px = (W - pill_w) // 2
-    py = min(pill_y, H - 160)
-
-    rgba = img.convert("RGBA")
-    lay  = Image.new("RGBA", (W, H), (0, 0, 0, 0))
-    ld   = ImageDraw.Draw(lay)
-    try:
-        ld.rounded_rectangle([(px, py), (px + pill_w, py + pill_h)],
-                              radius=34, fill=(*color, 230))
-    except TypeError:
-        ld.rectangle([(px, py), (px + pill_w, py + pill_h)], fill=(*color, 230))
-    rgba.alpha_composite(lay)
-    img  = rgba.convert("RGB")
-    draw = ImageDraw.Draw(img)
-
-    lf   = _font(28, bold=True)
-    ltxt = "POSITIVE PULSE"
-    ltw  = _text_w(draw, ltxt, lf)
-    lth  = _text_h(draw, ltxt, lf)
-    draw.text(((W - ltw) // 2, py + (pill_h - lth) // 2), ltxt, font=lf, fill=(255, 255, 255))
-
-    # Rodapé
-    ff  = _font(22, bold=False)
-    ds  = datetime.now().strftime("%B %d, %Y").upper()
-    draw.text((margin, H - 44), ds, font=ff, fill=(80, 80, 100))
-    draw.rectangle([(0, H - 6), (W, H)], fill=color)
-
-    path = "slide3.jpg"
+    path = f"slide{idx + 2}.jpg"
     img.save(path, "JPEG", quality=95)
-    log.info(f"Slide 3 criado -> {path}")
+    log.info(f"Slide {idx + 2} criado: {item['name']}")
     return path
 
-
-# ─── 8. Upload para imgbb ─────────────────────────────────────────────────────
+# ─── 5. Upload imgbb ──────────────────────────────────────────────────────────
 
 def upload_image(path: str) -> str:
     with open(path, "rb") as f:
         b64 = base64.b64encode(f.read()).decode()
-    resp = requests.post(
-        "https://api.imgbb.com/1/upload",
-        data={"key": IMGBB_API_KEY, "image": b64},
-        timeout=30,
-    )
-    resp.raise_for_status()
-    url = resp.json()["data"]["url"]
+    r = requests.post("https://api.imgbb.com/1/upload",
+                      data={"key": IMGBB_API_KEY, "image": b64}, timeout=30)
+    r.raise_for_status()
+    url = r.json()["data"]["url"]
     log.info(f"Upload OK -> {url}")
     return url
 
-
-# ─── 9. Enviar carousel para o webhook Make.com ───────────────────────────────
+# ─── 6. Webhook Make.com ──────────────────────────────────────────────────────
 
 def send_to_webhook(post: dict, image_urls: list):
-    caption_full = f"{post['caption']}\n\n{' '.join(post['hashtags'])}"
+    caption = f"{post['caption']}\n\n{' '.join(post['hashtags'])}"
     is_carousel = len(image_urls) > 1
     payload = {
-        "image_urls": image_urls,
-        "image_url":  image_urls[0],
-        "caption":    caption_full,
-        "headline":   post["headline"],
-        "category":   post["category"],
-        "timestamp":  datetime.now().isoformat(),
-        "is_carousel": "true" if is_carousel else "false",   # string para Make.com
+        "image_urls":  image_urls,
+        "image_url":   image_urls[0],
+        "caption":     caption,
+        "headline":    post["topic"],
+        "category":    "Positive",
+        "timestamp":   datetime.now().isoformat(),
+        "is_carousel": "true" if is_carousel else "false",
         "slide_count": len(image_urls),
     }
-    resp = requests.post(WEBHOOK_URL, json=payload, timeout=30)
-    resp.raise_for_status()
-    log.info(f"Webhook OK: {resp.status_code}")
-    return payload
+    r = requests.post(WEBHOOK_URL, json=payload, timeout=30)
+    r.raise_for_status()
+    log.info(f"Webhook OK: {r.status_code}")
 
+# ─── 7. Log ───────────────────────────────────────────────────────────────────
 
-# ─── 10. Log local ────────────────────────────────────────────────────────────
-
-def save_log(post: dict, image_urls: list):
+def save_log(post: dict, urls: list):
     path    = Path(LOG_FILE)
     history = json.loads(path.read_text(encoding="utf-8")) if path.exists() else []
     history.append({
-        "timestamp":  datetime.now().isoformat(),
-        "headline":   post["headline"],
-        "category":   post["category"],
-        "image_urls": image_urls,
-        "caption":    post["caption"],
-        "hashtags":   post["hashtags"],
+        "timestamp": datetime.now().isoformat(),
+        "topic":     post["topic"],
+        "items":     [i["name"] for i in post["items"]],
+        "urls":      urls,
     })
     path.write_text(json.dumps(history, indent=2, ensure_ascii=False), encoding="utf-8")
-    log.info(f"Log -> {LOG_FILE} ({len(history)} publicacoes)")
-
+    log.info(f"Log -> {len(history)} publicacoes")
 
 # ─── Main ─────────────────────────────────────────────────────────────────────
 
@@ -631,42 +373,37 @@ def main():
         log.error("ANTHROPIC_API_KEY nao definida.")
         raise SystemExit(1)
 
-    log.info("=== post_bot a iniciar ===")
+    log.info("=== post_bot @wealth style ===")
 
     log.info("Gerando conteudo com Claude...")
     post = generate_post()
 
-    post_type = post.get("post_type", "single")
-    log.info(f"Tipo de post: {post_type.upper()}")
+    items = post["items"]
+    slides_paths = []
 
-    log.info("Buscando foto de fundo...")
-    bg = fetch_background(post)
+    # Slide 1 — foto do tema geral
+    log.info("Buscando foto para slide 1...")
+    bg1 = fetch_photo(post.get("search_term", "inspiring news world"))
+    slides_paths.append(create_slide1(post, bg1))
 
-    if post_type == "carousel":
-        log.info("Criando 3 slides (carousel)...")
-        s1   = create_slide1(post, bg)
-        s2   = create_slide2(post, bg)   # mesma foto de fundo
-        s3   = create_slide3(post, bg)   # mesma foto de fundo
-        slides = [s1, s2, s3]
-    else:
-        log.info("Criando 1 slide (post simples)...")
-        s1   = create_slide1(post, bg)
-        slides = [s1]
+    # Slides 2-5 — uma foto por item
+    for i, item in enumerate(items):
+        log.info(f"Buscando foto para item {i+1}: {item['name']}...")
+        bg = fetch_photo(item["search"])
+        slides_paths.append(create_item_slide(item, i, len(items), bg))
 
-    log.info(f"Fazendo upload de {len(slides)} imagem(ns)...")
-    urls = [upload_image(s) for s in slides]
-    log.info(f"URLs: {urls}")
+    log.info(f"Fazendo upload de {len(slides_paths)} slides...")
+    urls = [upload_image(p) for p in slides_paths]
 
-    log.info("Enviando para webhook Make.com...")
+    log.info("Enviando para Make.com...")
     try:
         send_to_webhook(post, urls)
     except Exception as e:
         log.warning(f"Webhook falhou: {e}")
-        log.info(f"URLs disponiveis: {urls}")
+        log.info(f"URLs: {urls}")
 
     save_log(post, urls)
-    log.info(f"=== Concluido! {len(slides)} slide(s) publicado(s) ===")
-
+    log.info(f"=== Concluido! {len(slides_paths)} slides ===")
 
 if __name__ == "__main__":
     main()
