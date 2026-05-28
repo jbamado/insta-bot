@@ -1,0 +1,31 @@
+name: Post to Instagram
+
+on:
+  schedule:
+    # 9h e 18h hora de Portugal (UTC+1 verão, UTC+0 inverno)
+    # Usamos UTC+1 (WEST verão): 08:00 e 17:00 UTC
+    - cron: "0 8 * * *"   # 9h Portugal (verão)
+    - cron: "0 17 * * *"  # 18h Portugal (verão)
+  workflow_dispatch:       # permite correr manualmente
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run post_bot
+        env:
+          ANTHROPIC_API_KEY:   ${{ secrets.ANTHROPIC_API_KEY }}
+          UNSPLASH_ACCESS_KEY: ${{ secrets.UNSPLASH_ACCESS_KEY }}
+        run: python post_bot.py
