@@ -293,7 +293,13 @@ def create_item_slide(item: dict, idx: int, total: int, bg: Image.Image) -> str:
         if len(lines) <= 2:
             break
 
-    detail_f  = _impact(62)
+    # Tamanho adaptativo para o detalhe — nunca corta nas margens
+    detail_text = item["detail"].upper()
+    for size in [62, 52, 44, 36, 30]:
+        detail_f = _impact(size)
+        if _tw(draw, detail_text, detail_f) <= W - 2 * margin:
+            break
+
     detail_h  = _th(draw, "A", detail_f) + 8
     name_h    = _th(draw, "A", nf) + 10
     total_h   = len(lines) * name_h + detail_h + 16
@@ -306,7 +312,7 @@ def create_item_slide(item: dict, idx: int, total: int, bg: Image.Image) -> str:
 
     # ── Detalhe (branco, menor) ─────────────────────────────────────────────
     y += 8
-    _centered_shadow(draw, y, item["detail"].upper(), detail_f,
+    _centered_shadow(draw, y, detail_text, detail_f,
                      fill=WHITE, shadow=4, W=W)
 
     # ── Brand ──────────────────────────────────────────────────────────────
