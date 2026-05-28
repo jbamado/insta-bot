@@ -1,0 +1,6 @@
+﻿post_image.jpg
+publications.json
+post_bot.log
+__pycache__/
+*.pyc
+.env
