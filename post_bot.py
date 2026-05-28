@@ -338,101 +338,127 @@ def create_slide1(post: dict, bg: Image.Image | None) -> str:
     return path
 
 
-# ─── 6. SLIDE 2 — Key Facts ───────────────────────────────────────────────────
+# ─── helpers ──────────────────────────────────────────────────────────────────
 
-def create_slide2(post: dict) -> str:
+import re
+
+def _strip_emoji(text: str) -> str:
+    """Remove emojis que Pillow nao consegue renderizar."""
+    return re.sub(r'[^\x00-\x7FÀ-ɏḀ-ỿ]+', '', text).strip()
+
+
+def _dark_photo_bg(bg: Image.Image | None, category: str,
+                   overlay_alpha: int = 210) -> Image.Image:
+    """Foto com overlay muito escuro para slides 2 e 3."""
+    W, H = 1080, 1080
+    base = (bg or _gradient_bg(category)).copy()
+    overlay = Image.new("RGBA", (W, H), (8, 8, 14, overlay_alpha))
+    out = base.convert("RGBA")
+    out.alpha_composite(overlay)
+    return out.convert("RGB")
+
+
+# ─── 6. SLIDE 2 — Key Facts (redesign) ───────────────────────────────────────
+
+def create_slide2(post: dict, bg: Image.Image | None = None) -> str:
     W, H     = 1080, 1080
     margin   = 70
     category = post.get("category", "default")
     color    = BADGE_COLORS.get(category, BADGE_COLORS["default"])
     facts    = post.get("facts", ["No facts available"] * 3)
 
-    # Fundo muito escuro com gradiente subtil
-    img = Image.new("RGB", (W, H), (10, 10, 16))
-    draw = ImageDraw.Draw(img)
-    for y in range(H):
-        t = y / H
-        r = int(10 + 8 * t)
-        g = int(10 + 8 * t)
-        b = int(16 + 14 * t)
-        draw.line([(0, y), (W, y)], fill=(r, g, b))
-
+    img  = _dark_photo_bg(bg, category, overlay_alpha=215)
     draw = ImageDraw.Draw(img)
 
     # Barra colorida no topo
-    draw.rectangle([(0, 0), (W, 8)], fill=color)
+    draw.rectangle([(0, 0), (W, 6)], fill=color)
 
-    # Slide counter "2 / 3"
+    # Slide counter
     cf = _font(22, bold=False)
-    draw.text((margin, 35), "2 / 3", font=cf, fill=(180, 180, 180))
+    draw.text((margin, 32), "2 / 3", font=cf, fill=(160, 160, 175))
 
     # Brand topo direito
     ppf = _font(24, bold=True)
     ppw = _text_w(draw, "POSITIVE PULSE", ppf)
-    draw.text((W - margin - ppw, 31), "POSITIVE PULSE", font=ppf, fill=color)
+    draw.text((W - margin - ppw, 28), "POSITIVE PULSE", font=ppf, fill=color)
 
-    # Título da secção
-    tf    = _font(38, bold=True)
-    title = "KEY FACTS"
-    tw    = _text_w(draw, title, tf)
-    draw.text(((W - tw) // 2, 110), title, font=tf, fill=color)
+    # Secção "KEY FACTS" — centrada
+    tf  = _font(34, bold=True)
+    tw  = _text_w(draw, "KEY FACTS", tf)
+    draw.text(((W - tw) // 2, 100), "KEY FACTS", font=tf, fill=color)
+    lw2 = 80
+    draw.rectangle([((W - lw2) // 2, 148), ((W + lw2) // 2, 151)], fill=color)
 
-    # Linha decorativa sob o título
-    lw2 = 120
-    draw.rectangle([((W - lw2) // 2, 165), ((W + lw2) // 2, 168)], fill=color)
-
-    # Headline pequena
-    hf    = _font(44, bold=True)
+    # Headline
+    hf    = _font(46, bold=True)
     lines = _wrap(post["headline"].upper(), hf, draw, W - 2 * margin)
-    y     = 205
+    y     = 180
     for line in lines[:2]:
-        draw.text((margin, y), line, font=hf, fill=(230, 230, 240))
-        y += _text_h(draw, line, hf) + 6
-    y += 40
+        draw.text((margin, y), line, font=hf, fill=(245, 245, 255))
+        y += _text_h(draw, line, hf) + 8
+    y += 36
 
-    # 3 Facts com card background cada um
-    fact_font = _font(34, bold=False)
-    card_h    = 130
-    gap       = 28
+    # 3 factos sem emoji — layout limpo com número colorido
+    fact_font = _font(32, bold=False)
+    num_font  = _font(36, bold=True)
+    card_pad  = 22
+    gap       = 24
+    num_box   = 58
 
     for i, fact in enumerate(facts[:3]):
-        fx = margin
-        fy = y + i * (card_h + gap)
+        clean = _strip_emoji(fact)
+        if not clean:
+            clean = fact  # fallback sem strip
 
-        # Card semi-transparente
-        img_rgba = img.convert("RGBA")
-        card_lay = Image.new("RGBA", (W, H), (0, 0, 0, 0))
-        cd       = ImageDraw.Draw(card_lay)
+        # Calcular altura do card
+        fact_lines = _wrap(clean, fact_font, draw, W - 2 * margin - num_box - 28)
+        card_h = max(num_box + 16, len(fact_lines) * (_text_h(draw, "A", fact_font) + 6) + 2 * card_pad)
+        fx, fy = margin, y
+
+        # Card background
+        rgba = img.convert("RGBA")
+        lay  = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+        ld   = ImageDraw.Draw(lay)
         try:
-            cd.rounded_rectangle(
-                [(fx, fy), (W - margin, fy + card_h)],
-                radius=16,
-                fill=(*color, 28),
-                outline=(*color, 80),
-                width=2,
-            )
+            ld.rounded_rectangle([(fx, fy), (W - margin, fy + card_h)],
+                                  radius=14, fill=(*color, 22), outline=(*color, 90), width=2)
         except TypeError:
-            cd.rectangle([(fx, fy), (W - margin, fy + card_h)], fill=(*color, 28))
-        img_rgba.alpha_composite(card_lay)
-        img  = img_rgba.convert("RGB")
+            ld.rectangle([(fx, fy), (W - margin, fy + card_h)], fill=(*color, 22))
+        rgba.alpha_composite(lay)
+        img  = rgba.convert("RGB")
         draw = ImageDraw.Draw(img)
 
-        # Número do facto
-        nf = _font(36, bold=True)
-        draw.text((fx + 20, fy + 22), str(i + 1), font=nf, fill=color)
+        # Número em caixa colorida
+        nx   = fx + card_pad
+        ny   = fy + (card_h - num_box) // 2
+        try:
+            draw.rounded_rectangle([(nx, ny), (nx + num_box, ny + num_box)],
+                                    radius=10, fill=color)
+        except TypeError:
+            draw.rectangle([(nx, ny), (nx + num_box, ny + num_box)], fill=color)
+        num_str = str(i + 1)
+        nw      = _text_w(draw, num_str, num_font)
+        nh      = _text_h(draw, num_str, num_font)
+        draw.text((nx + (num_box - nw) // 2, ny + (num_box - nh) // 2),
+                  num_str, font=num_font, fill=(255, 255, 255))
 
         # Texto do facto
-        fact_lines = _wrap(fact, fact_font, draw, W - 2 * margin - 70)
-        ty = fy + 18
-        for line in fact_lines[:2]:
-            draw.text((fx + 65, ty), line, font=fact_font, fill=(215, 215, 225))
-            ty += _text_h(draw, line, fact_font) + 4
+        tx = nx + num_box + 18
+        ty = fy + card_pad
+        for line in fact_lines[:3]:
+            draw.text((tx, ty), line, font=fact_font, fill=(220, 220, 235))
+            ty += _text_h(draw, line, fact_font) + 6
+
+        y += card_h + gap
 
     # Rodapé
     ff  = _font(22, bold=False)
     ds  = datetime.now().strftime("%B %d, %Y").upper()
-    draw.text((margin, H - 45), ds, font=ff, fill=(70, 70, 85))
-    draw.rectangle([(0, H - 8), (W, H)], fill=color)
+    draw.text((margin, H - 44), ds, font=ff, fill=(80, 80, 100))
+    lf  = _font(22, bold=True)
+    lw  = _text_w(draw, "POSITIVE PULSE", lf)
+    draw.text((W - margin - lw, H - 44), "POSITIVE PULSE", font=lf, fill=color)
+    draw.rectangle([(0, H - 6), (W, H)], fill=color)
 
     path = "slide2.jpg"
     img.save(path, "JPEG", quality=95)
@@ -440,96 +466,103 @@ def create_slide2(post: dict) -> str:
     return path
 
 
-# ─── 7. SLIDE 3 — Impact + CTA ────────────────────────────────────────────────
+# ─── 7. SLIDE 3 — Impact + CTA (redesign) ────────────────────────────────────
 
-def create_slide3(post: dict) -> str:
+def create_slide3(post: dict, bg: Image.Image | None = None) -> str:
     W, H     = 1080, 1080
     margin   = 80
     category = post.get("category", "default")
     color    = BADGE_COLORS.get(category, BADGE_COLORS["default"])
-    impact   = post.get("impact", post["headline"])
+    impact   = _strip_emoji(post.get("impact", post["headline"])) or post.get("impact", post["headline"])
     cta      = post.get("cta", "Follow for more good news every day!")
 
-    top_c, bot_c = GRADIENT_FALLBACK.get(category, GRADIENT_FALLBACK["default"])
-    # Tornar o gradiente um pouco mais escuro para contraste
-    top_c = tuple(max(0, c - 5) for c in top_c)
-    bot_c = tuple(min(255, c + 20) for c in bot_c)
-
-    img  = Image.new("RGB", (W, H))
-    draw = ImageDraw.Draw(img)
-    for y in range(H):
-        t = y / H
-        c = tuple(int(top_c[i] + (bot_c[i] - top_c[i]) * t) for i in range(3))
-        draw.line([(0, y), (W, y)], fill=c)
-
+    img  = _dark_photo_bg(bg, category, overlay_alpha=200)
     draw = ImageDraw.Draw(img)
 
     # Barra colorida topo
-    draw.rectangle([(0, 0), (W, 8)], fill=color)
+    draw.rectangle([(0, 0), (W, 6)], fill=color)
 
-    # Slide counter "3 / 3"
+    # Slide counter
     cf = _font(22, bold=False)
-    draw.text((margin, 35), "3 / 3", font=cf, fill=(180, 180, 180))
+    draw.text((margin, 32), "3 / 3", font=cf, fill=(160, 160, 175))
 
     # Brand topo direito
     ppf = _font(24, bold=True)
     ppw = _text_w(draw, "POSITIVE PULSE", ppf)
-    draw.text((W - margin - ppw, 31), "POSITIVE PULSE", font=ppf, fill=color)
+    draw.text((W - margin - ppw, 28), "POSITIVE PULSE", font=ppf, fill=color)
 
-    # Aspas decorativas grandes
-    qf = _font(180, bold=True)
-    draw.text((margin - 15, 80), "“", font=qf, fill=(*color, 60) if False else color)
+    # Label "THE IMPACT" centrada
+    tf  = _font(30, bold=True)
+    lbl = "THE IMPACT"
+    tw  = _text_w(draw, lbl, tf)
+    draw.text(((W - tw) // 2, 108), lbl, font=tf, fill=color)
+    draw.rectangle([((W - 60) // 2, 152), ((W + 60) // 2, 155)], fill=color)
 
-    # Impact statement (grande, centrado)
-    if_size = 68
-    ifont   = _font(if_size, bold=True)
-    ilines  = _wrap(impact.upper(), ifont, draw, W - 2 * margin)
-    # Total height do bloco de texto
-    line_h  = _text_h(draw, "A", ifont) + 14
-    total_h = line_h * len(ilines[:4])
-    start_y = (H - total_h) // 2 - 60
+    # Linha separadora horizontal
+    draw.rectangle([(margin, 190), (W - margin, 192)], fill=(60, 60, 80))
+
+    # Impact statement — grande, centrado, multi-linha
+    if_font  = _font(72, bold=True)
+    ilines   = _wrap(impact.upper(), if_font, draw, W - 2 * margin)
+    line_h   = _text_h(draw, "A", if_font) + 16
+    total_h  = line_h * min(len(ilines), 4)
+    start_y  = 230 + (H - 230 - 300 - total_h) // 2   # centrar verticalmente
 
     for line in ilines[:4]:
-        lw3 = _text_w(draw, line, ifont)
-        draw.text(((W - lw3) // 2, start_y), line, font=ifont, fill=(255, 255, 255))
+        lw3 = _text_w(draw, line, if_font)
+        # Sombra suave
+        draw.text(((W - lw3) // 2 + 3, start_y + 3), line, font=if_font, fill=(0, 0, 0))
+        draw.text(((W - lw3) // 2, start_y), line, font=if_font, fill=(255, 255, 255))
         start_y += line_h
 
-    # Linha decorativa
-    y_line = start_y + 30
-    draw.rectangle([((W - 100) // 2, y_line), ((W + 100) // 2, y_line + 4)], fill=color)
+    # Linha decorativa pós-impact
+    sep_y = start_y + 30
+    draw.rectangle([(margin + 80, sep_y), (W - margin - 80, sep_y + 3)], fill=color)
 
     # CTA
-    ctaf  = _font(32, bold=False)
-    ctaw  = _text_w(draw, cta, ctaf)
-    draw.text(((W - ctaw) // 2, y_line + 28), cta, font=ctaf, fill=(200, 200, 215))
+    ctaf = _font(34, bold=False)
+    ctaw = _text_w(draw, cta, ctaf)
+    if ctaw > W - 2 * margin:
+        # quebrar em 2 linhas
+        cta_lines = _wrap(cta, ctaf, draw, W - 2 * margin)
+        cy = sep_y + 22
+        for cl in cta_lines[:2]:
+            clw = _text_w(draw, cl, ctaf)
+            draw.text(((W - clw) // 2, cy), cl, font=ctaf, fill=(200, 205, 220))
+            cy += _text_h(draw, cl, ctaf) + 6
+        pill_y = cy + 30
+    else:
+        draw.text(((W - ctaw) // 2, sep_y + 22), cta, font=ctaf, fill=(200, 205, 220))
+        pill_y = sep_y + 22 + _text_h(draw, cta, ctaf) + 40
 
-    # Quadrado com logo no centro em baixo
-    box_w, box_h = 340, 80
-    bx = (W - box_w) // 2
-    by = H - 145
+    # Pílula POSITIVE PULSE
+    pill_w, pill_h = 320, 68
+    px = (W - pill_w) // 2
+    py = min(pill_y, H - 160)
 
-    img_rgba = img.convert("RGBA")
-    box_lay  = Image.new("RGBA", (W, H), (0, 0, 0, 0))
-    bd       = ImageDraw.Draw(box_lay)
+    rgba = img.convert("RGBA")
+    lay  = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    ld   = ImageDraw.Draw(lay)
     try:
-        bd.rounded_rectangle([(bx, by), (bx + box_w, by + box_h)],
-                              radius=40, fill=(*color, 220))
+        ld.rounded_rectangle([(px, py), (px + pill_w, py + pill_h)],
+                              radius=34, fill=(*color, 230))
     except TypeError:
-        bd.rectangle([(bx, by), (bx + box_w, by + box_h)], fill=(*color, 220))
-    img_rgba.alpha_composite(box_lay)
-    img  = img_rgba.convert("RGB")
+        ld.rectangle([(px, py), (px + pill_w, py + pill_h)], fill=(*color, 230))
+    rgba.alpha_composite(lay)
+    img  = rgba.convert("RGB")
     draw = ImageDraw.Draw(img)
 
-    lf  = _font(30, bold=True)
+    lf   = _font(28, bold=True)
     ltxt = "POSITIVE PULSE"
     ltw  = _text_w(draw, ltxt, lf)
-    draw.text(((W - ltw) // 2, by + 24), ltxt, font=lf, fill=(255, 255, 255))
+    lth  = _text_h(draw, ltxt, lf)
+    draw.text(((W - ltw) // 2, py + (pill_h - lth) // 2), ltxt, font=lf, fill=(255, 255, 255))
 
     # Rodapé
     ff  = _font(22, bold=False)
     ds  = datetime.now().strftime("%B %d, %Y").upper()
-    draw.text((margin, H - 38), ds, font=ff, fill=(100, 100, 115))
-    draw.rectangle([(0, H - 8), (W, H)], fill=color)
+    draw.text((margin, H - 44), ds, font=ff, fill=(80, 80, 100))
+    draw.rectangle([(0, H - 6), (W, H)], fill=color)
 
     path = "slide3.jpg"
     img.save(path, "JPEG", quality=95)
@@ -557,14 +590,15 @@ def upload_image(path: str) -> str:
 
 def send_to_webhook(post: dict, image_urls: list):
     caption_full = f"{post['caption']}\n\n{' '.join(post['hashtags'])}"
+    is_carousel = len(image_urls) > 1
     payload = {
-        "image_urls": image_urls,          # lista com 3 URLs
-        "image_url":  image_urls[0],       # compatibilidade com cenário antigo
+        "image_urls": image_urls,
+        "image_url":  image_urls[0],
         "caption":    caption_full,
         "headline":   post["headline"],
         "category":   post["category"],
         "timestamp":  datetime.now().isoformat(),
-        "is_carousel": True,
+        "is_carousel": "true" if is_carousel else "false",   # string para Make.com
         "slide_count": len(image_urls),
     }
     resp = requests.post(WEBHOOK_URL, json=payload, timeout=30)
@@ -611,8 +645,8 @@ def main():
     if post_type == "carousel":
         log.info("Criando 3 slides (carousel)...")
         s1   = create_slide1(post, bg)
-        s2   = create_slide2(post)
-        s3   = create_slide3(post)
+        s2   = create_slide2(post, bg)   # mesma foto de fundo
+        s3   = create_slide3(post, bg)   # mesma foto de fundo
         slides = [s1, s2, s3]
     else:
         log.info("Criando 1 slide (post simples)...")
