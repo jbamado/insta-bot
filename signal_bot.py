@@ -196,9 +196,76 @@ def generate_chart(df: pd.DataFrame, symbol: str) -> str:
     log.info(f"Gráfico gerado: {path}")
     return path
 
-# ─── 5. Análise Claude ────────────────────────────────────────────────────────
+# ─── 5. Backtest rápido ───────────────────────────────────────────────────────
 
-def analyze(df: pd.DataFrame, symbol: str, chart_path: str, trigger: str) -> dict:
+def quick_backtest(df: pd.DataFrame, direction: str) -> tuple[int, int]:
+    """
+    Simula as últimas ocorrências de condições semelhantes no histórico.
+    Win = preço subiu 1.5% (LONG) ou desceu 1.5% (SHORT) antes de atingir SL de 1%.
+    Retorna (wins, total).
+    """
+    TP = 0.015   # 1.5 % take-profit
+    SL = 0.010   # 1.0 % stop-loss
+    LOOK_BACK  = len(df) - 6    # não usar as últimas 5 velas (ainda sem resultado)
+    MAX_CANDLES = 10             # janela de avaliação após entrada
+
+    wins  = 0
+    total = 0
+
+    for i in range(20, LOOK_BACK):
+        row  = df.iloc[i]
+        prev = df.iloc[i - 1]
+
+        rsi    = row.get("RSI_14",  50)
+        ema20  = row.get("EMA_20",   0)
+        ema50  = row.get("EMA_50",   0)
+        pe20   = prev.get("EMA_20",  0)
+        pe50   = prev.get("EMA_50",  0)
+        macd   = row.get("MACD_12_26_9",  0)
+        sig    = row.get("MACDs_12_26_9", 0)
+        p_macd = prev.get("MACD_12_26_9",  0)
+        p_sig  = prev.get("MACDs_12_26_9", 0)
+        bb_low  = row.get("BBL_20_2.0", 0)
+        bb_high = row.get("BBU_20_2.0", 0)
+        close   = float(row["close"])
+
+        # Detecta condição semelhante no histórico
+        matched = False
+        if direction == "LONG":
+            if (rsi < 33) or \
+               (pe20 < pe50 and ema20 >= pe50) or \
+               (p_macd < p_sig and macd >= p_sig) or \
+               (bb_low and close < bb_low * 1.003):
+                matched = True
+        else:  # SHORT
+            if (rsi > 67) or \
+               (pe20 > pe50 and ema20 <= pe50) or \
+               (p_macd > p_sig and macd <= p_sig) or \
+               (bb_high and close > bb_high * 0.997):
+                matched = True
+
+        if not matched:
+            continue
+
+        total += 1
+        entry = close
+
+        for j in range(i + 1, min(i + 1 + MAX_CANDLES, len(df))):
+            hi  = float(df.iloc[j]["high"])
+            lo  = float(df.iloc[j]["low"])
+            if direction == "LONG":
+                if hi >= entry * (1 + TP):  wins += 1; break
+                if lo <= entry * (1 - SL):             break
+            else:
+                if lo  <= entry * (1 - TP): wins += 1; break
+                if hi  >= entry * (1 + SL):             break
+
+    return wins, total
+
+
+# ─── 6. Análise Claude ────────────────────────────────────────────────────────
+
+def analyze(df: pd.DataFrame, symbol: str, chart_path: str, trigger: str, winrate_info: str) -> dict:
     c = df.iloc[-1]
 
     def f(col): return round(float(c[col]), 6) if col in c and pd.notna(c[col]) else None
@@ -211,7 +278,8 @@ def analyze(df: pd.DataFrame, symbol: str, chart_path: str, trigger: str) -> dic
         "macd":     f("MACD_12_26_9"), "macd_signal": f("MACDs_12_26_9"),
         "bb_upper": f("BBU_20_2.0"),   "bb_lower":    f("BBL_20_2.0"),
         "atr":      f("ATRr_14"),
-        "trigger":  trigger,
+        "trigger":      trigger,
+        "backtest_info": winrate_info,
     }
 
     with open(chart_path, "rb") as fh:
@@ -270,11 +338,18 @@ Sê rigoroso — apenas setups de alta qualidade."""
 
 # ─── 6. Telegram ──────────────────────────────────────────────────────────────
 
-def send_telegram(symbol: str, analysis: dict, chart_path: str):
-    d = analysis["direction"]
+def send_telegram(symbol: str, analysis: dict, chart_path: str, wins: int, total: int):
+    d     = analysis["direction"]
     emoji = "🟢" if d == "LONG" else "🔴"
     conf  = analysis.get("confidence", 0)
     stars = "⭐" * min(conf, 5)
+
+    # Win rate
+    if total >= 5:
+        wr_pct  = round(wins / total * 100)
+        wr_line = f"📈 *Win Rate:* `{wr_pct}%` _{wins}/{total} setups similares_\n"
+    else:
+        wr_line = f"📈 *Win Rate:* _dados insuficientes ({total} amostras)_\n"
 
     caption = (
         f"{emoji} *{symbol} — {d}*  {stars}\n"
@@ -285,8 +360,9 @@ def send_telegram(symbol: str, analysis: dict, chart_path: str):
         f"🎯 *TP1:*  `{analysis.get('take_profit_1','')}`\n"
         f"🎯 *TP2:*  `{analysis.get('take_profit_2','')}`\n"
         f"📊 *R:R:*  `{analysis.get('risk_reward','')}`\n"
-        f"⭐ *Confiança:* `{conf}/10`\n\n"
-        f"📝 _{analysis.get('analysis','')}_\n\n"
+        f"⭐ *Confiança:* `{conf}/10`\n"
+        + wr_line +
+        f"\n📝 _{analysis.get('analysis','')}_\n\n"
         f"⚠️ _Não é conselho financeiro. DYOR._"
     )
 
@@ -324,15 +400,26 @@ def main():
             chart = generate_chart(df, symbol)
 
             log.info(f"  A analisar com Claude...")
-            result = analyze(df, symbol, chart, trigger)
+            # Calcula win rate antes de chamar Claude (mais rápido)
+            # Usa direção provisória baseada no trigger
+            prov_dir = "LONG" if any(k in trigger.lower() for k in ["bullish", "oversold", "inferior"]) else "SHORT"
+            wins, total = quick_backtest(df, prov_dir)
+            winrate_info = f"{wins}/{total} ({round(wins/total*100) if total else 0}%)" if total else "sem dados"
+            log.info(f"  Backtest: {winrate_info} ({prov_dir})")
+
+            result = analyze(df, symbol, chart, trigger, winrate_info)
 
             conf = result.get("confidence", 0)
             has_signal = result.get("has_signal", False)
-            log.info(f"  Resultado: {result.get('direction')} | Confiança: {conf}/10 | Sinal: {has_signal}")
+            direction  = result.get("direction", prov_dir)
+            log.info(f"  Resultado: {direction} | Confiança: {conf}/10 | Sinal: {has_signal}")
 
             if has_signal and conf >= 7:
+                # Recalcula win rate com direção correcta do Claude
+                if direction != prov_dir:
+                    wins, total = quick_backtest(df, direction)
                 log.info(f"  *** SINAL ENVIADO para Telegram ***")
-                send_telegram(symbol, result, chart)
+                send_telegram(symbol, result, chart, wins, total)
             else:
                 log.info(f"  Setup descartado (qualidade insuficiente)")
 
