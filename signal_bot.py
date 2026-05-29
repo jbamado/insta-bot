@@ -223,9 +223,11 @@ def check_confluence(df: pd.DataFrame, daily_trend: str,
     if sr_type == "resistance" and sr_dist < 1.5:
         bear.append(f"Resistencia proxima ({sr_level:.2f}, {sr_dist:.1f}%)")
 
-    # ── Candlestick patterns ───────────────────────────────────────────────────
-    bull_pats = [p for p in patterns if any(k in p for k in ["Hammer","Bullish Engulfing","Marubozu"])]
-    bear_pats = [p for p in patterns if any(k in p for k in ["Shooting Star","Bearish Engulfing"])]
+    # ── Candlestick patterns (match exacto) ───────────────────────────────────
+    bull_pats = [p for p in patterns
+                 if p in ("Hammer", "Bullish Engulfing", "Marubozu Bullish")]
+    bear_pats = [p for p in patterns
+                 if p in ("Shooting Star", "Inverted Hammer", "Bearish Engulfing")]
     if bull_pats: bull.append(f"Padrao: {bull_pats[0]}")
     if bear_pats: bear.append(f"Padrao: {bear_pats[0]}")
 
@@ -409,38 +411,38 @@ def _build_chart(df: pd.DataFrame, symbol: str, supports: list, resistances: lis
                        alpha=0.08, color="yellow", zorder=1)
 
     # ── Triângulos + labels de padrões ────────────────────────────────────────
-    # Usa ax.text() com coordenadas mistas (x=eixo 0-1, y=preço)
-    # Evita ax.plot(x_data) que rescalava o eixo X e comprimia as velas
+    # NOTA: match EXACTO para evitar "Inverted Hammer" cair em "Hammer"
     if patterns:
         ax    = axes[0]
         trans = blended_transform_factory(ax.transAxes, ax.transData)
         last  = plot.iloc[-1]
 
+        # Offset baseado na escala visível do eixo Y (0.7% do range)
+        ylim   = ax.get_ylim()
+        offset = (ylim[1] - ylim[0]) * 0.007
+
+        # Classificação exacta — sem substring
         bull_pats = [p for p in patterns
-                     if any(k in p for k in ["Hammer","Bullish Engulfing","Marubozu"])]
+                     if p in ("Hammer", "Bullish Engulfing", "Marubozu Bullish")]
         bear_pats = [p for p in patterns
-                     if any(k in p for k in ["Shooting Star","Bearish Engulfing"])]
+                     if p in ("Shooting Star", "Inverted Hammer", "Bearish Engulfing")]
 
         if bull_pats:
-            y_tri = float(last["low"]) * 0.9952
-            # Triângulo verde (caractere Unicode — sem afetar eixos)
+            y_tri = float(last["low"]) - offset   # abaixo do low
             ax.text(0.985, y_tri, "▲", transform=trans,
                     ha="right", va="top", color="lime",
                     fontsize=18, fontweight="bold", zorder=15)
-            # Label ao lado
-            ax.text(0.975, y_tri, f" {bull_pats[0]}", transform=trans,
+            ax.text(0.974, y_tri, f" {bull_pats[0]}", transform=trans,
                     ha="right", va="top", color="lime",
                     fontsize=9, fontweight="bold",
                     bbox=dict(boxstyle="round,pad=0.3", facecolor="#001800", alpha=0.9))
 
         if bear_pats:
-            y_tri = float(last["high"]) * 1.0048
-            # Triângulo vermelho
+            y_tri = float(last["high"]) + offset  # acima do high
             ax.text(0.985, y_tri, "▼", transform=trans,
                     ha="right", va="bottom", color="#ff4444",
                     fontsize=18, fontweight="bold", zorder=15)
-            # Label ao lado
-            ax.text(0.975, y_tri, f" {bear_pats[0]}", transform=trans,
+            ax.text(0.974, y_tri, f" {bear_pats[0]}", transform=trans,
                     ha="right", va="bottom", color="#ff4444",
                     fontsize=9, fontweight="bold",
                     bbox=dict(boxstyle="round,pad=0.3", facecolor="#180000", alpha=0.9))
