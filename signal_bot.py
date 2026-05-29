@@ -320,7 +320,7 @@ def generate_chart_fig(df: pd.DataFrame, symbol: str, supports: list,
         rc={"axes.labelcolor":"#cccccc","xtick.color":"#aaaaaa","ytick.color":"#aaaaaa"},
     )
 
-    icon  = {"BULLISH":"📈","BEARISH":"📉","NEUTRAL":"➡️"}.get(daily_trend,"")
+    icon  = {"BULLISH":"[UP]","BEARISH":"[DN]","NEUTRAL":"[--]"}.get(daily_trend,"")
     title = (f"\n{symbol} 4H  —  "
              f"{datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M')} UTC  |  "
              f"Daily: {icon} {daily_trend}")
