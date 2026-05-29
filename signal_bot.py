@@ -281,10 +281,21 @@ def quick_backtest(df: pd.DataFrame, direction: str) -> tuple[int, int]:
 
 # ─── 7. Gráfico ───────────────────────────────────────────────────────────────
 
-def generate_chart_fig(df: pd.DataFrame, symbol: str, supports: list,
-                       resistances: list, daily_trend: str):
-    """Gera o gráfico e devolve (fig, axes, plot_df) — sem guardar em disco."""
-    plot  = df.tail(80).copy()
+def _build_chart(df: pd.DataFrame, symbol: str, supports: list, resistances: list,
+                 daily_trend: str, patterns: list = None,
+                 entry: float = None, sl: float = None,
+                 tp1: float = None, tp2: float = None,
+                 suffix: str = "") -> str:
+    """
+    Gera e guarda o gráfico em disco. Devolve o path.
+    Inclui opcionalmente marcadores de padrão + linhas Entry/SL/TP.
+    """
+    plot = df.tail(80).copy()
+
+    # ── Strip timezone para compatibilidade com mplfinance ────────────────────
+    if plot.index.tz is not None:
+        plot.index = plot.index.tz_localize(None)
+
     mpf_df = plot[["open","high","low","close","volume"]].copy()
     mpf_df.columns = ["Open","High","Low","Close","Volume"]
 
@@ -296,8 +307,8 @@ def generate_chart_fig(df: pd.DataFrame, symbol: str, supports: list,
     safe_ap("EMA_20",     color="#00bfff", width=1.2, panel=0)
     safe_ap("EMA_50",     color="orange",  width=1.2, panel=0)
     safe_ap("EMA_200",    color="#ff4444", width=1.5, panel=0)
-    safe_ap("BBU_20_2.0", color="#666666", width=0.8, linestyle="--", panel=0)
-    safe_ap("BBL_20_2.0", color="#666666", width=0.8, linestyle="--", panel=0)
+    safe_ap("BBU_20_2.0", color="#888888", width=0.8, linestyle="--", panel=0)
+    safe_ap("BBL_20_2.0", color="#888888", width=0.8, linestyle="--", panel=0)
 
     if "RSI_14" in plot.columns:
         safe_ap("RSI_14", panel=2, color="purple", width=1.2, ylabel="RSI")
@@ -314,6 +325,8 @@ def generate_chart_fig(df: pd.DataFrame, symbol: str, supports: list,
             apds.append(mpf.make_addplot(hist, type="bar", panel=3,
                         color=["#26a69a" if v >= 0 else "#ef5350" for v in hist], width=0.8))
 
+    # (padrões desenhados directamente nos axes após o plot — ver abaixo)
+
     style = mpf.make_mpf_style(
         base_mpf_style="nightclouds", gridstyle="--", gridcolor="#2a2a2a",
         facecolor="#0d0d0d", edgecolor="#333333",
@@ -327,126 +340,160 @@ def generate_chart_fig(df: pd.DataFrame, symbol: str, supports: list,
 
     lo_rng = float(plot["low"].min())  * 0.97
     hi_rng = float(plot["high"].max()) * 1.03
-    sr_prices, sr_colors = [], []
+
+    # ── hlines: S/R + trade levels ────────────────────────────────────────────
+    h_prices, h_colors, h_styles, h_widths = [], [], [], []
+
     for s in supports:
         if lo_rng <= s <= hi_rng:
-            sr_prices.append(s); sr_colors.append("#00ff88")
+            h_prices.append(s); h_colors.append("#00ff88")
+            h_styles.append("-."); h_widths.append(1.2)
     for r in resistances:
         if lo_rng <= r <= hi_rng:
-            sr_prices.append(r); sr_colors.append("#ff4444")
+            h_prices.append(r); h_colors.append("#ff4444")
+            h_styles.append("-."); h_widths.append(1.2)
+
+    def _fmt(p: float) -> str:
+        return f"{p:,.0f}" if p >= 1_000 else f"{p:,.2f}"
+
+    if entry is not None:
+        h_prices.append(entry); h_colors.append("white")
+        h_styles.append("--"); h_widths.append(2.2)
+    if sl is not None:
+        h_prices.append(sl);    h_colors.append("#ff3333")
+        h_styles.append("--"); h_widths.append(2.2)
+    if tp1 is not None:
+        h_prices.append(tp1);   h_colors.append("#00dd44")
+        h_styles.append("--"); h_widths.append(2.0)
+    if tp2 is not None:
+        h_prices.append(tp2);   h_colors.append("#00aa33")
+        h_styles.append("--"); h_widths.append(1.6)
+
+    path = f"chart_{symbol.replace('/','_')}{suffix}.png"
 
     kwargs = dict(
         type="candle", style=style, volume=True,
         panel_ratios=(4,1,1.5,1.5), figsize=(14,10), title=title,
+        savefig=dict(fname=path, dpi=150, bbox_inches="tight"),
         returnfig=True,
         warn_too_much_data=500,
     )
     if apds:
         kwargs["addplot"] = apds
-    if sr_prices:
-        kwargs["hlines"] = dict(hlines=sr_prices, colors=sr_colors,
-                                linestyle="-.", linewidths=1.2, alpha=0.75)
+    if h_prices:
+        kwargs["hlines"] = dict(hlines=h_prices, colors=h_colors,
+                                linestyle=h_styles, linewidths=h_widths, alpha=0.85)
 
     fig, axes = mpf.plot(mpf_df, **kwargs)
-    return fig, axes, plot
 
+    # ── Labels de texto para trade levels ─────────────────────────────────────
+    if any(v is not None for v in [entry, sl, tp1, tp2]):
+        ax    = axes[0]
+        trans = blended_transform_factory(ax.transAxes, ax.transData)
 
-def annotate_chart(fig, axes, plot_df: pd.DataFrame,
-                   patterns: list = None,
-                   entry: float = None, sl: float = None,
-                   tp1: float = None, tp2: float = None,
-                   direction: str = "LONG"):
-    """
-    Desenha no gráfico:
-    - Marcadores de padrão de vela (triângulo + nome) na última vela
-    - Linhas horizontais tracejadas para Entry / SL / TP1 / TP2
-    - Zona de risco sombreada entre Entry e SL
-    """
-    ax    = axes[0]                                             # painel de preço
-    trans = blended_transform_factory(ax.transAxes, ax.transData)
-    last  = plot_df.iloc[-1]
+        trade_lbls = []
+        if entry is not None: trade_lbls.append((entry, "white",   f" ENTRY {_fmt(entry)}"))
+        if sl    is not None: trade_lbls.append((sl,    "#ff4444", f" SL   {_fmt(sl)}"))
+        if tp1   is not None: trade_lbls.append((tp1,   "#00dd44", f" TP1  {_fmt(tp1)}"))
+        if tp2   is not None: trade_lbls.append((tp2,   "#00aa33", f" TP2  {_fmt(tp2)}"))
 
-    # ── Marcadores de padrões de vela ─────────────────────────────────────────
+        for price, color, label in trade_lbls:
+            ax.text(0.01, price, label, transform=trans,
+                    ha="left", va="bottom", color=color,
+                    fontsize=8, fontweight="bold",
+                    bbox=dict(boxstyle="round,pad=0.2", facecolor="#111111", alpha=0.8))
+
+        # Zona de risco sombreada
+        if entry is not None and sl is not None:
+            ax.axhspan(min(entry, sl), max(entry, sl),
+                       alpha=0.08, color="yellow", zorder=1)
+
+    # ── Triângulos + labels de padrões (directamente nos axes) ───────────────
     if patterns:
+        ax    = axes[0]
+        trans = blended_transform_factory(ax.transAxes, ax.transData)
+        last  = plot.iloc[-1]
+
+        # Posição X da última vela em formato matplotlib date
+        last_x = mdates.date2num(plot.index[-1].to_pydatetime())
+
         bull_pats = [p for p in patterns
                      if any(k in p for k in ["Hammer","Bullish Engulfing","Marubozu"])]
         bear_pats = [p for p in patterns
                      if any(k in p for k in ["Shooting Star","Bearish Engulfing"])]
 
-        try:
-            last_x = mdates.date2num(plot_df.index[-1].to_pydatetime())
-        except Exception:
-            last_x = len(plot_df) - 1
-
         if bull_pats:
-            y = float(last["low"]) * 0.9965
-            ax.scatter([last_x], [y], marker="^", color="lime",
-                       s=280, zorder=10, clip_on=False)
-            ax.text(0.97, y, f" {bull_pats[0]}", transform=trans,
+            y_tri = float(last["low"]) * 0.9955
+            # Triângulo verde apontado para cima
+            ax.plot(last_x, y_tri, marker="^",
+                    color="lime", markersize=16, zorder=15,
+                    markeredgecolor="white", markeredgewidth=0.8)
+            # Label do padrão
+            ax.text(0.97, y_tri, f" {bull_pats[0]}", transform=trans,
                     ha="right", va="top", color="lime",
-                    fontsize=8.5, fontweight="bold",
-                    bbox=dict(boxstyle="round,pad=0.3", facecolor="#001800", alpha=0.85))
+                    fontsize=9, fontweight="bold",
+                    bbox=dict(boxstyle="round,pad=0.3", facecolor="#001800", alpha=0.9))
 
         if bear_pats:
-            y = float(last["high"]) * 1.0035
-            ax.scatter([last_x], [y], marker="v", color="#ff4444",
-                       s=280, zorder=10, clip_on=False)
-            ax.text(0.97, y, f" {bear_pats[0]}", transform=trans,
+            y_tri = float(last["high"]) * 1.0045
+            # Triângulo vermelho apontado para baixo
+            ax.plot(last_x, y_tri, marker="v",
+                    color="#ff4444", markersize=16, zorder=15,
+                    markeredgecolor="white", markeredgewidth=0.8)
+            # Label do padrão
+            ax.text(0.97, y_tri, f" {bear_pats[0]}", transform=trans,
                     ha="right", va="bottom", color="#ff4444",
-                    fontsize=8.5, fontweight="bold",
-                    bbox=dict(boxstyle="round,pad=0.3", facecolor="#180000", alpha=0.85))
+                    fontsize=9, fontweight="bold",
+                    bbox=dict(boxstyle="round,pad=0.3", facecolor="#180000", alpha=0.9))
 
-    # ── Linhas de Entry / SL / TP ─────────────────────────────────────────────
-    def _fmt(p: float) -> str:
-        return f"{p:,.2f}" if p < 1_000 else f"{p:,.0f}"
-
-    trade_lvls = []
-    if entry is not None:
-        trade_lvls.append((entry, "white",   2.0, f"  ENTRY  {_fmt(entry)}"))
-    if sl is not None:
-        trade_lvls.append((sl,    "#ff3333", 2.0, f"  SL    {_fmt(sl)}"))
-    if tp1 is not None:
-        trade_lvls.append((tp1,   "#00dd44", 1.8, f"  TP1   {_fmt(tp1)}"))
-    if tp2 is not None:
-        trade_lvls.append((tp2,   "#00aa33", 1.5, f"  TP2   {_fmt(tp2)}"))
-
-    for price, color, lw, label in trade_lvls:
-        ax.axhline(y=price, color=color, linestyle="--", linewidth=lw,
-                   alpha=0.9, zorder=5)
-        ax.text(0.01, price, label, transform=trans,
-                ha="left", va="bottom",
-                color=color, fontsize=8.5, fontweight="bold",
-                bbox=dict(boxstyle="round,pad=0.25", facecolor="#111111", alpha=0.8))
-
-    # ── Zona de risco (sombra amarela entre Entry e SL) ───────────────────────
-    if entry is not None and sl is not None:
-        lo = min(entry, sl)
-        hi = max(entry, sl)
-        ax.axhspan(lo, hi, alpha=0.07, color="yellow", zorder=1)
-
-
-def fig_to_bytes(fig) -> bytes:
-    """Serializa a figura para PNG em memória sem fechar a figura."""
-    buf = io.BytesIO()
-    fig.savefig(buf, dpi=150, bbox_inches="tight", facecolor="#0d0d0d")
-    buf.seek(0)
-    return buf.read()
-
-
-def save_chart(fig, symbol: str) -> str:
-    """Guarda a figura em disco e fecha-a. Devolve o path."""
-    path = f"chart_{symbol.replace('/','_')}.png"
     fig.savefig(path, dpi=150, bbox_inches="tight", facecolor="#0d0d0d")
     plt.close(fig)
     log.info(f"Grafico guardado: {path}")
     return path
 
 
-# Alias retrocompatibilidade (test_chart.py usa generate_chart)
+def generate_chart_for_claude(df: pd.DataFrame, symbol: str, supports: list,
+                               resistances: list, daily_trend: str) -> tuple[str, bytes]:
+    """Gera chart limpo para Claude. Devolve (path, bytes_png)."""
+    path = _build_chart(df, symbol, supports, resistances, daily_trend)
+    with open(path, "rb") as f:
+        return path, f.read()
+
+
+def generate_chart_for_telegram(df: pd.DataFrame, symbol: str, supports: list,
+                                 resistances: list, daily_trend: str, patterns: list,
+                                 entry: float, sl: float, tp1: float, tp2: float) -> str:
+    """Gera chart anotado com padrões + Entry/SL/TP para Telegram."""
+    return _build_chart(df, symbol, supports, resistances, daily_trend,
+                        patterns=patterns, entry=entry, sl=sl, tp1=tp1, tp2=tp2,
+                        suffix="_final")
+
+
+# Alias retrocompatibilidade
 def generate_chart(df, symbol, supports=None, resistances=None, daily_trend="NEUTRAL"):
-    fig, axes, plot_df = generate_chart_fig(
-        df, symbol, supports or [], resistances or [], daily_trend)
-    return save_chart(fig, symbol)
+    path, _ = generate_chart_for_claude(df, symbol, supports or [], resistances or [], daily_trend)
+    return path
+
+
+def generate_chart_fig(df, symbol, supports, resistances, daily_trend):
+    """Retrocompatibilidade — gera chart e devolve (None, None, plot_df)."""
+    path, img_bytes = generate_chart_for_claude(df, symbol, supports, resistances, daily_trend)
+    return None, None, df.tail(80).copy()
+
+
+def fig_to_bytes(fig) -> bytes:
+    """Stub retrocompatibilidade."""
+    return b""
+
+
+def save_chart(fig, symbol: str) -> str:
+    """Stub retrocompatibilidade."""
+    return f"chart_{symbol.replace('/','_')}.png"
+
+
+def annotate_chart(*args, **kwargs):
+    """Stub retrocompatibilidade — anotação agora feita em _build_chart."""
+    pass
 
 
 def parse_price(text) -> float | None:
@@ -604,10 +651,10 @@ def main():
             wr_info = f"{wins}/{total} ({round(wins/total*100) if total else 0}%)" if total else "sem dados"
             log.info(f"  Backtest: {wr_info}")
 
-            # Gera gráfico em memória (figura mantida aberta)
-            fig, axes, plot_df = generate_chart_fig(df, symbol, supports, resistances, daily_trend)
-            img_bytes = fig_to_bytes(fig)   # para Claude — não fecha a figura
-            img_b64   = base64.standard_b64encode(img_bytes).decode()
+            # Gera chart limpo para Claude analisar
+            chart_claude, img_bytes = generate_chart_for_claude(
+                df, symbol, supports, resistances, daily_trend)
+            img_b64 = base64.standard_b64encode(img_bytes).decode()
 
             log.info(f"  A analisar com Claude...")
             result = analyze(df, symbol, img_b64, conditions, direction,
@@ -626,14 +673,10 @@ def main():
                 tp2   = parse_price(result.get("take_profit_2"))
                 log.info(f"  Niveis: Entry={entry} SL={sl} TP1={tp1} TP2={tp2}")
 
-                # Anotar o gráfico com padrões + Entry/SL/TP
-                annotate_chart(fig, axes, plot_df,
-                               patterns=patterns,
-                               entry=entry, sl=sl, tp1=tp1, tp2=tp2,
-                               direction=final)
-
-                # Guardar gráfico anotado em disco
-                chart = save_chart(fig, symbol)
+                # Gera chart anotado com padrões + Entry/SL/TP para Telegram
+                chart = generate_chart_for_telegram(
+                    df, symbol, supports, resistances, daily_trend,
+                    patterns, entry, sl, tp1, tp2)
 
                 if final != direction:
                     wins, total = quick_backtest(df, final)
@@ -642,7 +685,6 @@ def main():
                 send_telegram(symbol, result, chart, conditions, daily_trend, wins, total)
 
             else:
-                plt.close(fig)
                 log.info(f"  Descartado ({conf}/10 < {MIN_CONFIDENCE})")
 
         except Exception as e:
