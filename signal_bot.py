@@ -408,14 +408,13 @@ def _build_chart(df: pd.DataFrame, symbol: str, supports: list, resistances: lis
             ax.axhspan(min(entry, sl), max(entry, sl),
                        alpha=0.08, color="yellow", zorder=1)
 
-    # ── Triângulos + labels de padrões (directamente nos axes) ───────────────
+    # ── Triângulos + labels de padrões ────────────────────────────────────────
+    # Usa ax.text() com coordenadas mistas (x=eixo 0-1, y=preço)
+    # Evita ax.plot(x_data) que rescalava o eixo X e comprimia as velas
     if patterns:
         ax    = axes[0]
         trans = blended_transform_factory(ax.transAxes, ax.transData)
         last  = plot.iloc[-1]
-
-        # Posição X da última vela em formato matplotlib date
-        last_x = mdates.date2num(plot.index[-1].to_pydatetime())
 
         bull_pats = [p for p in patterns
                      if any(k in p for k in ["Hammer","Bullish Engulfing","Marubozu"])]
@@ -423,25 +422,25 @@ def _build_chart(df: pd.DataFrame, symbol: str, supports: list, resistances: lis
                      if any(k in p for k in ["Shooting Star","Bearish Engulfing"])]
 
         if bull_pats:
-            y_tri = float(last["low"]) * 0.9955
-            # Triângulo verde apontado para cima
-            ax.plot(last_x, y_tri, marker="^",
-                    color="lime", markersize=16, zorder=15,
-                    markeredgecolor="white", markeredgewidth=0.8)
-            # Label do padrão
-            ax.text(0.97, y_tri, f" {bull_pats[0]}", transform=trans,
+            y_tri = float(last["low"]) * 0.9952
+            # Triângulo verde (caractere Unicode — sem afetar eixos)
+            ax.text(0.985, y_tri, "▲", transform=trans,
+                    ha="right", va="top", color="lime",
+                    fontsize=18, fontweight="bold", zorder=15)
+            # Label ao lado
+            ax.text(0.975, y_tri, f" {bull_pats[0]}", transform=trans,
                     ha="right", va="top", color="lime",
                     fontsize=9, fontweight="bold",
                     bbox=dict(boxstyle="round,pad=0.3", facecolor="#001800", alpha=0.9))
 
         if bear_pats:
-            y_tri = float(last["high"]) * 1.0045
-            # Triângulo vermelho apontado para baixo
-            ax.plot(last_x, y_tri, marker="v",
-                    color="#ff4444", markersize=16, zorder=15,
-                    markeredgecolor="white", markeredgewidth=0.8)
-            # Label do padrão
-            ax.text(0.97, y_tri, f" {bear_pats[0]}", transform=trans,
+            y_tri = float(last["high"]) * 1.0048
+            # Triângulo vermelho
+            ax.text(0.985, y_tri, "▼", transform=trans,
+                    ha="right", va="bottom", color="#ff4444",
+                    fontsize=18, fontweight="bold", zorder=15)
+            # Label ao lado
+            ax.text(0.975, y_tri, f" {bear_pats[0]}", transform=trans,
                     ha="right", va="bottom", color="#ff4444",
                     fontsize=9, fontweight="bold",
                     bbox=dict(boxstyle="round,pad=0.3", facecolor="#180000", alpha=0.9))
