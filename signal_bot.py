@@ -1,13 +1,11 @@
 #!/usr/bin/env python3
 """
-signal_bot.py — Crypto TA Scanner com Claude
-=============================================
-Escaneia BTC, ETH, SOL, BNB no timeframe 4H
-Só envia alerta quando há um setup FRESCO de alta qualidade
-Envia gráfico + análise para Telegram
+signal_bot.py — Crypto TA Scanner PRO com Claude
+=================================================
+v2: Multi-Timeframe + Confluência (≥2) + S&R + Candlestick Patterns + Volume
 """
 
-import os, io, json, logging, base64
+import os, json, logging, base64
 from datetime import datetime, timezone
 
 import yfinance as yf
@@ -22,45 +20,38 @@ import requests
 
 # ─── Config ───────────────────────────────────────────────────────────────────
 
-PAIRS     = ["BTC/USDT", "ETH/USDT", "SOL/USDT", "BNB/USDT"]
-TIMEFRAME = "4h"
-LIMIT     = 200   # velas a buscar
+PAIRS          = ["BTC/USDT", "ETH/USDT", "SOL/USDT", "BNB/USDT"]
+TIMEFRAME      = "4h"
+LIMIT          = 200
+MIN_CONFLUENCE = 2    # mínimo de condições em simultâneo
+MIN_CONFIDENCE = 7    # confiança mínima Claude para enviar alerta
 
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 TELEGRAM_TOKEN    = os.getenv("TELEGRAM_TOKEN", "")
 TELEGRAM_CHAT_ID  = os.getenv("TELEGRAM_CHAT_ID", "")
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s  %(levelname)-8s  %(message)s",
-)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s  %(levelname)-8s  %(message)s")
 log = logging.getLogger(__name__)
 
 # ─── 1. Dados ─────────────────────────────────────────────────────────────────
 
-def fetch_ohlcv(symbol: str) -> pd.DataFrame:
-    # BTC/USDT → BTC-USD para yfinance
-    ticker = symbol.split("/")[0] + "-USD"
-    raw = yf.download(ticker, period="60d", interval="1h", progress=False, auto_adjust=True)
+def _ticker(symbol: str) -> str:
+    return symbol.split("/")[0] + "-USD"
 
-    # yfinance às vezes devolve MultiIndex
+def fetch_4h(symbol: str) -> pd.DataFrame:
+    raw = yf.download(_ticker(symbol), period="60d", interval="1h", progress=False, auto_adjust=True)
     if isinstance(raw.columns, pd.MultiIndex):
         raw.columns = raw.columns.droplevel(1)
-
     raw.columns = [c.lower() for c in raw.columns]
-
-    # Resample 1h → 4h
-    df = raw.resample("4h").agg({
-        "open":   "first",
-        "high":   "max",
-        "low":    "min",
-        "close":  "last",
-        "volume": "sum",
-    }).dropna()
-
+    df = raw.resample("4h").agg({"open":"first","high":"max","low":"min","close":"last","volume":"sum"}).dropna()
     return df.tail(LIMIT)
 
-# ─── 2. Indicadores ───────────────────────────────────────────────────────────
+def fetch_daily(symbol: str) -> pd.DataFrame:
+    raw = yf.download(_ticker(symbol), period="365d", interval="1d", progress=False, auto_adjust=True)
+    if isinstance(raw.columns, pd.MultiIndex):
+        raw.columns = raw.columns.droplevel(1)
+    raw.columns = [c.lower() for c in raw.columns]
+    return raw.dropna().tail(200)
 
 def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df.ta.ema(length=20,  append=True)
@@ -72,362 +63,446 @@ def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df.ta.atr(length=14, append=True)
     return df
 
-# ─── 3. Pré-filtro (sem chamar Claude) ────────────────────────────────────────
+# ─── 2. Tendência Diária (MTF) ────────────────────────────────────────────────
 
-def is_fresh_setup(df: pd.DataFrame) -> tuple[bool, str]:
-    """
-    Verifica se um sinal ACABOU de acontecer (última ou penúltima vela).
-    Retorna (True, motivo) ou (False, "").
-    """
-    c  = df.iloc[-1]   # vela atual
-    p  = df.iloc[-2]   # vela anterior
-    p2 = df.iloc[-3]   # 2 velas atrás
+def get_daily_trend(symbol: str) -> str:
+    try:
+        daily = fetch_daily(symbol)
+        daily.ta.ema(length=50,  append=True)
+        daily.ta.ema(length=200, append=True)
+        last  = daily.iloc[-1]
+        close = float(last["close"])
+        e50   = float(last.get("EMA_50")  or 0)
+        e200  = float(last.get("EMA_200") or 0)
+        if close > e50 > e200:
+            return "BULLISH"
+        elif close < e50 < e200:
+            return "BEARISH"
+        return "NEUTRAL"
+    except Exception as e:
+        log.warning(f"Daily trend error: {e}")
+        return "NEUTRAL"
 
-    rsi   = c.get("RSI_14")
-    p_rsi = p.get("RSI_14")
+# ─── 3. Suporte & Resistência ─────────────────────────────────────────────────
 
-    e20, e50     = c.get("EMA_20"), c.get("EMA_50")
-    pe20, pe50   = p.get("EMA_20"), p.get("EMA_50")
+def find_sr_levels(df: pd.DataFrame, n: int = 4, lookback: int = 80) -> tuple[list, list]:
+    sub = df.tail(lookback).reset_index(drop=True)
+    supports, resistances = [], []
+    for i in range(n, len(sub) - n):
+        lo = float(sub.iloc[i]["low"])
+        hi = float(sub.iloc[i]["high"])
+        if all(lo <= float(sub.iloc[i-j]["low"])  for j in range(1, n+1)) and \
+           all(lo <= float(sub.iloc[i+j]["low"])  for j in range(1, n+1)):
+            supports.append(lo)
+        if all(hi >= float(sub.iloc[i-j]["high"]) for j in range(1, n+1)) and \
+           all(hi >= float(sub.iloc[i+j]["high"]) for j in range(1, n+1)):
+            resistances.append(hi)
+
+    def cluster(levels, thr=0.008):
+        if not levels:
+            return []
+        levels = sorted(levels)
+        out = [levels[0]]
+        for lvl in levels[1:]:
+            if (lvl - out[-1]) / out[-1] > thr:
+                out.append(lvl)
+            else:
+                out[-1] = (out[-1] + lvl) / 2
+        return out
+
+    return cluster(supports), cluster(resistances)
+
+def nearest_sr(price: float, supports: list, resistances: list) -> tuple[float, str, float]:
+    all_lvls = [(s, "support") for s in supports] + [(r, "resistance") for r in resistances]
+    if not all_lvls:
+        return 0, "none", 999
+    best = min(all_lvls, key=lambda x: abs(x[0] - price))
+    return best[0], best[1], abs(best[0] - price) / price * 100
+
+# ─── 4. Padrões de Velas ──────────────────────────────────────────────────────
+
+def detect_patterns(df: pd.DataFrame) -> list[str]:
+    if len(df) < 2:
+        return []
+    c, p = df.iloc[-1], df.iloc[-2]
+    o, h, l, cl  = float(c["open"]), float(c["high"]), float(c["low"]),  float(c["close"])
+    po, ph, pl, pcl = float(p["open"]), float(p["high"]), float(p["low"]), float(p["close"])
+    body  = abs(cl - o)
+    rng   = h - l
+    lw    = min(o, cl) - l
+    uw    = h - max(o, cl)
+    found = []
+    if rng == 0:
+        return found
+    if body / rng < 0.1:
+        found.append("Doji")
+    if body > 0 and lw >= 2 * body and uw <= 0.3 * body and cl > o:
+        found.append("Hammer 🔨")
+    if body > 0 and uw >= 2 * body and lw <= 0.3 * body:
+        found.append("Shooting Star 🌠" if cl < o else "Inverted Hammer")
+    if pcl < po and cl > o and o <= pcl and cl >= po:
+        found.append("Bullish Engulfing 🟢")
+    if pcl > po and cl < o and o >= pcl and cl <= po:
+        found.append("Bearish Engulfing 🔴")
+    if cl > o and body / rng > 0.85:
+        found.append("Marubozu Bullish 💪")
+    return found
+
+# ─── 5. Confluência (≥ MIN_CONFLUENCE condições) ──────────────────────────────
+
+def check_confluence(df: pd.DataFrame, daily_trend: str,
+                     supports: list, resistances: list) -> tuple[int, list, str]:
+    c, p, p2 = df.iloc[-1], df.iloc[-2], df.iloc[-3]
+
+    rsi, p_rsi = c.get("RSI_14"), p.get("RSI_14")
+    e20, e50   = c.get("EMA_20"), c.get("EMA_50")
+    pe20, pe50 = p.get("EMA_20"), p.get("EMA_50")
     p2e20, p2e50 = p2.get("EMA_20"), p2.get("EMA_50")
-
-    macd, sig     = c.get("MACD_12_26_9"), c.get("MACDs_12_26_9")
+    macd, sig  = c.get("MACD_12_26_9"), c.get("MACDs_12_26_9")
     p_macd, p_sig = p.get("MACD_12_26_9"), p.get("MACDs_12_26_9")
+    bb_low     = c.get("BBL_20_2.0")
+    bb_high    = c.get("BBU_20_2.0")
+    close      = float(c["close"])
 
-    bb_low  = c.get("BBL_20_2.0")
-    bb_high = c.get("BBU_20_2.0")
-    close   = c["close"]
+    vol_avg   = float(df["volume"].tail(20).mean())
+    vol_cur   = float(c["volume"])
+    vol_spike = vol_cur > vol_avg * 1.5
 
-    reasons = []
+    patterns  = detect_patterns(df)
+    sr_level, sr_type, sr_dist = nearest_sr(close, supports, resistances)
 
-    # RSI acabou de entrar em zona extrema
-    if rsi is not None and p_rsi is not None:
-        if p_rsi >= 32 and rsi < 32:
-            reasons.append(f"RSI oversold ({rsi:.1f})")
-        if p_rsi <= 68 and rsi > 68:
-            reasons.append(f"RSI overbought ({rsi:.1f})")
+    bull, bear = [], []
 
-    # EMA cross nas últimas 2 velas
+    # ── EMA alignment / cross ─────────────────────────────────────────────────
     if all(v is not None for v in [e20, e50, pe20, pe50, p2e20, p2e50]):
-        if p2e20 < p2e50 and pe20 >= pe50:   # cross bullish na vela anterior
-            reasons.append("EMA20 cruzou acima EMA50 (bullish)")
-        if p2e20 > p2e50 and pe20 <= pe50:   # cross bearish na vela anterior
-            reasons.append("EMA20 cruzou abaixo EMA50 (bearish)")
+        if p2e20 < p2e50 and pe20 >= pe50:
+            bull.append("EMA20 × EMA50 bullish cross")
+        elif e20 > e50:
+            bull.append("EMA20 acima EMA50")
+        if p2e20 > p2e50 and pe20 <= pe50:
+            bear.append("EMA20 × EMA50 bearish cross")
+        elif e20 < e50:
+            bear.append("EMA20 abaixo EMA50")
 
-    # MACD cross fresco
+    # ── RSI ───────────────────────────────────────────────────────────────────
+    if rsi is not None and p_rsi is not None:
+        if p_rsi >= 30 and rsi < 30:
+            bull.append(f"RSI oversold ({rsi:.1f})")
+        elif 30 <= rsi <= 45:
+            bull.append(f"RSI zona favorável ({rsi:.1f})")
+        if p_rsi <= 70 and rsi > 70:
+            bear.append(f"RSI overbought ({rsi:.1f})")
+        elif 55 <= rsi <= 70:
+            bear.append(f"RSI zona favorável ({rsi:.1f})")
+
+    # ── MACD ──────────────────────────────────────────────────────────────────
     if all(v is not None for v in [macd, sig, p_macd, p_sig]):
-        if p_macd < p_sig and macd > sig:
-            reasons.append("MACD cruzou bullish")
-        if p_macd > p_sig and macd < sig:
-            reasons.append("MACD cruzou bearish")
+        if p_macd < p_sig and macd >= p_sig:
+            bull.append("MACD cross bullish")
+        elif macd > sig and macd > 0:
+            bull.append("MACD bullish acima zero")
+        if p_macd > p_sig and macd <= p_sig:
+            bear.append("MACD cross bearish")
+        elif macd < sig and macd < 0:
+            bear.append("MACD bearish abaixo zero")
 
-    # Preço tocou Bollinger Band
-    if bb_low and close < bb_low * 1.002:
-        reasons.append(f"Preço tocou BB inferior ({close:.2f})")
-    if bb_high and close > bb_high * 0.998:
-        reasons.append(f"Preço tocou BB superior ({close:.2f})")
+    # ── Bollinger Bands ───────────────────────────────────────────────────────
+    if bb_low  and close < bb_low  * 1.005:
+        bull.append("Preço na BB inferior")
+    if bb_high and close > bb_high * 0.995:
+        bear.append("Preço na BB superior")
 
-    if reasons:
-        return True, " | ".join(reasons)
-    return False, ""
+    # ── S&R proximity ─────────────────────────────────────────────────────────
+    if sr_type == "support"    and sr_dist < 1.5:
+        bull.append(f"Suporte próximo ({sr_level:.2f}, {sr_dist:.1f}%)")
+    if sr_type == "resistance" and sr_dist < 1.5:
+        bear.append(f"Resistência próxima ({sr_level:.2f}, {sr_dist:.1f}%)")
 
-# ─── 4. Gráfico ───────────────────────────────────────────────────────────────
+    # ── Candlestick patterns ───────────────────────────────────────────────────
+    bull_pats = [p for p in patterns if any(k in p for k in ["Hammer","Engulfing 🟢","Marubozu"])]
+    bear_pats = [p for p in patterns if any(k in p for k in ["Shooting","Engulfing 🔴"])]
+    if bull_pats: bull.append(f"Padrão: {bull_pats[0]}")
+    if bear_pats: bear.append(f"Padrão: {bear_pats[0]}")
 
-def generate_chart(df: pd.DataFrame, symbol: str) -> str:
+    # ── Volume spike ──────────────────────────────────────────────────────────
+    if vol_spike:
+        tag = f"Volume spike ({vol_cur/vol_avg:.1f}x médio)"
+        bull.append(tag)
+        bear.append(tag)
+
+    # ── Daily trend filter (penaliza contra-tendência) ────────────────────────
+    bs, brs = len(bull), len(bear)
+    if daily_trend == "BULLISH" and brs > bs and brs < 3:
+        brs = max(0, brs - 1)
+    elif daily_trend == "BEARISH" and bs > brs and bs < 3:
+        bs = max(0, bs - 1)
+
+    if bs >= brs and bs >= MIN_CONFLUENCE:
+        return bs, bull, "LONG"
+    elif brs > bs and brs >= MIN_CONFLUENCE:
+        return brs, bear, "SHORT"
+    return max(bs, brs), [], "NONE"
+
+# ─── 6. Backtest rápido ───────────────────────────────────────────────────────
+
+def quick_backtest(df: pd.DataFrame, direction: str) -> tuple[int, int]:
+    TP, SL = 0.015, 0.010
+    wins = total = 0
+    for i in range(20, len(df) - 6):
+        row, prev = df.iloc[i], df.iloc[i-1]
+        rsi   = row.get("RSI_14", 50)
+        ema20 = row.get("EMA_20", 0); ema50 = row.get("EMA_50", 0)
+        pe20  = prev.get("EMA_20", 0); pe50  = prev.get("EMA_50", 0)
+        macd  = row.get("MACD_12_26_9", 0); sig = row.get("MACDs_12_26_9", 0)
+        pm    = prev.get("MACD_12_26_9", 0); ps  = prev.get("MACDs_12_26_9", 0)
+        bbl   = row.get("BBL_20_2.0", 0); bbh = row.get("BBU_20_2.0", 0)
+        close = float(row["close"])
+        matched = (direction == "LONG"  and (rsi < 33 or (pe20 < pe50 and ema20 >= pe50) or
+                   (pm < ps and macd >= ps) or (bbl and close < bbl*1.003))) or \
+                  (direction == "SHORT" and (rsi > 67 or (pe20 > pe50 and ema20 <= pe50) or
+                   (pm > ps and macd <= ps) or (bbh and close > bbh*0.997)))
+        if not matched:
+            continue
+        total += 1
+        for j in range(i+1, min(i+11, len(df))):
+            hi = float(df.iloc[j]["high"]); lo = float(df.iloc[j]["low"])
+            if direction == "LONG":
+                if hi >= close*(1+TP): wins += 1; break
+                if lo <= close*(1-SL): break
+            else:
+                if lo <= close*(1-TP): wins += 1; break
+                if hi >= close*(1+SL): break
+    return wins, total
+
+# ─── 7. Gráfico com S&R desenhado ────────────────────────────────────────────
+
+def generate_chart(df: pd.DataFrame, symbol: str, supports: list,
+                   resistances: list, daily_trend: str) -> str:
     plot = df.tail(80).copy()
-
-    # mplfinance precisa de colunas capitalizadas
-    mpf_df = plot[["open", "high", "low", "close", "volume"]].copy()
-    mpf_df.columns = ["Open", "High", "Low", "Close", "Volume"]
+    mpf_df = plot[["open","high","low","close","volume"]].copy()
+    mpf_df.columns = ["Open","High","Low","Close","Volume"]
 
     apds = []
-
     def safe_ap(col, **kw):
         if col in plot.columns and plot[col].notna().sum() > 5:
             apds.append(mpf.make_addplot(plot[col], **kw))
 
-    safe_ap("EMA_20",  color="#00bfff", width=1.2, panel=0)
-    safe_ap("EMA_50",  color="orange",  width=1.2, panel=0)
-    safe_ap("EMA_200", color="#ff4444", width=1.5, panel=0)
-    safe_ap("BBU_20_2.0", color="#888888", width=0.8, linestyle="--", panel=0)
-    safe_ap("BBL_20_2.0", color="#888888", width=0.8, linestyle="--", panel=0)
+    safe_ap("EMA_20",     color="#00bfff", width=1.2, panel=0)
+    safe_ap("EMA_50",     color="orange",  width=1.2, panel=0)
+    safe_ap("EMA_200",    color="#ff4444", width=1.5, panel=0)
+    safe_ap("BBU_20_2.0", color="#666666", width=0.8, linestyle="--", panel=0)
+    safe_ap("BBL_20_2.0", color="#666666", width=0.8, linestyle="--", panel=0)
 
-    # RSI panel
     if "RSI_14" in plot.columns:
         safe_ap("RSI_14", panel=2, color="purple", width=1.2, ylabel="RSI")
-        ob = pd.Series(70, index=plot.index)
-        os_ = pd.Series(30, index=plot.index)
-        apds.append(mpf.make_addplot(ob,  panel=2, color="red",   linestyle="--", width=0.7))
-        apds.append(mpf.make_addplot(os_, panel=2, color="green", linestyle="--", width=0.7))
+        apds.append(mpf.make_addplot(pd.Series(70, index=plot.index), panel=2, color="red",   linestyle="--", width=0.7))
+        apds.append(mpf.make_addplot(pd.Series(30, index=plot.index), panel=2, color="green", linestyle="--", width=0.7))
 
-    # MACD panel
-    if "MACD_12_26_9" in plot.columns and "MACDs_12_26_9" in plot.columns:
+    if "MACD_12_26_9" in plot.columns:
         safe_ap("MACD_12_26_9",  panel=3, color="#00bfff", width=1.0, ylabel="MACD")
         safe_ap("MACDs_12_26_9", panel=3, color="red",     width=1.0)
         if "MACDh_12_26_9" in plot.columns:
             hist = plot["MACDh_12_26_9"].fillna(0)
-            colors = ["#26a69a" if v >= 0 else "#ef5350" for v in hist]
-            apds.append(mpf.make_addplot(hist, type="bar", panel=3, color=colors, width=0.8))
+            apds.append(mpf.make_addplot(hist, type="bar", panel=3,
+                        color=["#26a69a" if v >= 0 else "#ef5350" for v in hist], width=0.8))
 
     style = mpf.make_mpf_style(
-        base_mpf_style="nightclouds",
-        gridstyle="--",
-        gridcolor="#2a2a2a",
-        facecolor="#0d0d0d",
-        edgecolor="#333333",
-        rc={"axes.labelcolor": "#cccccc", "xtick.color": "#aaaaaa", "ytick.color": "#aaaaaa"},
+        base_mpf_style="nightclouds", gridstyle="--", gridcolor="#2a2a2a",
+        facecolor="#0d0d0d", edgecolor="#333333",
+        rc={"axes.labelcolor":"#cccccc","xtick.color":"#aaaaaa","ytick.color":"#aaaaaa"},
     )
 
-    path = f"chart_{symbol.replace('/', '_')}.png"
+    icon = {"BULLISH":"📈","BEARISH":"📉","NEUTRAL":"➡️"}.get(daily_trend,"")
+    title = f"\n{symbol} 4H  —  {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M')} UTC  |  Daily: {icon} {daily_trend}"
+
+    # S&R lines visíveis no intervalo do gráfico
+    lo_rng, hi_rng = float(plot["low"].min())*0.97, float(plot["high"].max())*1.03
+    sr_prices, sr_colors = [], []
+    for s in supports:
+        if lo_rng <= s <= hi_rng:
+            sr_prices.append(s); sr_colors.append("#00ff88")
+    for r in resistances:
+        if lo_rng <= r <= hi_rng:
+            sr_prices.append(r); sr_colors.append("#ff4444")
+
+    path = f"chart_{symbol.replace('/','_')}.png"
     kwargs = dict(
-        type="candle",
-        style=style,
-        volume=True,
-        panel_ratios=(4, 1, 1.5, 1.5),
-        figsize=(14, 10),
-        title=f"\n{symbol}  {TIMEFRAME.upper()}  —  {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M')} UTC",
+        type="candle", style=style, volume=True,
+        panel_ratios=(4,1,1.5,1.5), figsize=(14,10), title=title,
         savefig=dict(fname=path, dpi=150, bbox_inches="tight"),
         warn_too_much_data=500,
     )
     if apds:
         kwargs["addplot"] = apds
+    if sr_prices:
+        kwargs["hlines"] = dict(hlines=sr_prices, colors=sr_colors,
+                                linestyle="-.", linewidths=1.2, alpha=0.75)
 
     mpf.plot(mpf_df, **kwargs)
     plt.close("all")
     log.info(f"Gráfico gerado: {path}")
     return path
 
-# ─── 5. Backtest rápido ───────────────────────────────────────────────────────
+# ─── 8. Análise Claude ────────────────────────────────────────────────────────
 
-def quick_backtest(df: pd.DataFrame, direction: str) -> tuple[int, int]:
-    """
-    Simula as últimas ocorrências de condições semelhantes no histórico.
-    Win = preço subiu 1.5% (LONG) ou desceu 1.5% (SHORT) antes de atingir SL de 1%.
-    Retorna (wins, total).
-    """
-    TP = 0.015   # 1.5 % take-profit
-    SL = 0.010   # 1.0 % stop-loss
-    LOOK_BACK  = len(df) - 6    # não usar as últimas 5 velas (ainda sem resultado)
-    MAX_CANDLES = 10             # janela de avaliação após entrada
-
-    wins  = 0
-    total = 0
-
-    for i in range(20, LOOK_BACK):
-        row  = df.iloc[i]
-        prev = df.iloc[i - 1]
-
-        rsi    = row.get("RSI_14",  50)
-        ema20  = row.get("EMA_20",   0)
-        ema50  = row.get("EMA_50",   0)
-        pe20   = prev.get("EMA_20",  0)
-        pe50   = prev.get("EMA_50",  0)
-        macd   = row.get("MACD_12_26_9",  0)
-        sig    = row.get("MACDs_12_26_9", 0)
-        p_macd = prev.get("MACD_12_26_9",  0)
-        p_sig  = prev.get("MACDs_12_26_9", 0)
-        bb_low  = row.get("BBL_20_2.0", 0)
-        bb_high = row.get("BBU_20_2.0", 0)
-        close   = float(row["close"])
-
-        # Detecta condição semelhante no histórico
-        matched = False
-        if direction == "LONG":
-            if (rsi < 33) or \
-               (pe20 < pe50 and ema20 >= pe50) or \
-               (p_macd < p_sig and macd >= p_sig) or \
-               (bb_low and close < bb_low * 1.003):
-                matched = True
-        else:  # SHORT
-            if (rsi > 67) or \
-               (pe20 > pe50 and ema20 <= pe50) or \
-               (p_macd > p_sig and macd <= p_sig) or \
-               (bb_high and close > bb_high * 0.997):
-                matched = True
-
-        if not matched:
-            continue
-
-        total += 1
-        entry = close
-
-        for j in range(i + 1, min(i + 1 + MAX_CANDLES, len(df))):
-            hi  = float(df.iloc[j]["high"])
-            lo  = float(df.iloc[j]["low"])
-            if direction == "LONG":
-                if hi >= entry * (1 + TP):  wins += 1; break
-                if lo <= entry * (1 - SL):             break
-            else:
-                if lo  <= entry * (1 - TP): wins += 1; break
-                if hi  >= entry * (1 + SL):             break
-
-    return wins, total
-
-
-# ─── 6. Análise Claude ────────────────────────────────────────────────────────
-
-def analyze(df: pd.DataFrame, symbol: str, chart_path: str, trigger: str, winrate_info: str) -> dict:
+def analyze(df: pd.DataFrame, symbol: str, chart_path: str,
+            conditions: list, direction: str, daily_trend: str,
+            supports: list, resistances: list, winrate_info: str) -> dict:
     c = df.iloc[-1]
-
     def f(col): return round(float(c[col]), 6) if col in c and pd.notna(c[col]) else None
 
     data = {
-        "symbol": symbol, "timeframe": TIMEFRAME,
-        "close":    f("close"),
-        "rsi":      f("RSI_14"),
-        "ema20":    f("EMA_20"),   "ema50":  f("EMA_50"),  "ema200": f("EMA_200"),
-        "macd":     f("MACD_12_26_9"), "macd_signal": f("MACDs_12_26_9"),
-        "bb_upper": f("BBU_20_2.0"),   "bb_lower":    f("BBL_20_2.0"),
-        "atr":      f("ATRr_14"),
-        "trigger":      trigger,
-        "backtest_info": winrate_info,
+        "symbol": symbol, "timeframe": "4H", "daily_trend": daily_trend,
+        "close": f("close"), "rsi": f("RSI_14"),
+        "ema20": f("EMA_20"), "ema50": f("EMA_50"), "ema200": f("EMA_200"),
+        "macd": f("MACD_12_26_9"), "macd_signal": f("MACDs_12_26_9"),
+        "bb_upper": f("BBU_20_2.0"), "bb_lower": f("BBL_20_2.0"),
+        "atr": f("ATRr_14"),
+        "conditions_detected": conditions,
+        "preferred_direction": direction,
+        "key_supports":    [round(s,2) for s in supports[-4:]],
+        "key_resistances": [round(r,2) for r in resistances[:4]],
+        "backtest": winrate_info,
     }
 
     with open(chart_path, "rb") as fh:
         img_b64 = base64.standard_b64encode(fh.read()).decode()
 
-    prompt = f"""És um trader técnico experiente. Analisa este gráfico de {symbol} {TIMEFRAME}.
+    prompt = f"""És um trader técnico expert. Analisa este gráfico {symbol} 4H.
 
-Indicadores atuais:
+Dados:
 {json.dumps(data, indent=2)}
 
-Trigger detetado: {trigger}
+O sistema detetou {len(conditions)} condições: {', '.join(conditions)}
+Tendência diária: {daily_trend} | Direção sugerida: {direction}
 
-Analisa o gráfico com atenção. Avalia:
-- Direção da tendência (alinhamento EMAs)
-- Momentum (RSI, MACD)
-- Estrutura de preço (suporte/resistência, padrões de velas)
-- Confirmação de volume
-- Qualidade geral do setup
+Analisa o gráfico e confirma ou rejeita. Considera:
+1. Alinhamento com tendência diária
+2. Qualidade dos níveis S/R (linhas no gráfico)
+3. Espaço até próxima resistência/suporte
+4. Momentum atual (RSI, MACD)
+5. Padrões de velas visíveis
 
 Responde APENAS em JSON válido:
 {{
-  "has_signal": true ou false,
-  "direction": "LONG" ou "SHORT" ou "NONE",
-  "confidence": número de 1 a 10,
-  "entry_zone": "nível de entrada ou range",
-  "stop_loss": "nível de stop",
-  "take_profit_1": "primeiro alvo",
-  "take_profit_2": "segundo alvo",
+  "has_signal": true/false,
+  "direction": "LONG"/"SHORT"/"NONE",
+  "confidence": 1-10,
+  "entry_zone": "preço ou range",
+  "stop_loss": "nível",
+  "take_profit_1": "alvo 1",
+  "take_profit_2": "alvo 2",
   "risk_reward": "ex: 1:2.5",
-  "setup_name": "nome do setup, ex: EMA Cross + RSI Confirmation",
-  "analysis": "2-3 frases a explicar o setup de forma clara e objetiva"
+  "setup_name": "nome do setup",
+  "analysis": "2-3 frases claras e objetivas"
 }}
-
-Só coloca has_signal=true se confidence >= 7.
-Sê rigoroso — apenas setups de alta qualidade."""
+Só has_signal=true se confidence >= 7. Sê rigoroso."""
 
     client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
     msg = client.messages.create(
-        model="claude-opus-4-5",
-        max_tokens=600,
-        messages=[{
-            "role": "user",
-            "content": [
-                {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": img_b64}},
-                {"type": "text",  "text": prompt},
-            ],
-        }],
+        model="claude-opus-4-5", max_tokens=600,
+        messages=[{"role": "user", "content": [
+            {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": img_b64}},
+            {"type": "text",  "text": prompt},
+        ]}],
     )
-
     raw = msg.content[0].text.strip()
     if raw.startswith("```"):
         raw = raw.split("```")[1]
-        if raw.startswith("json"):
-            raw = raw[4:]
+        if raw.startswith("json"): raw = raw[4:]
     return json.loads(raw.strip())
 
-# ─── 6. Telegram ──────────────────────────────────────────────────────────────
+# ─── 9. Telegram ──────────────────────────────────────────────────────────────
 
-def send_telegram(symbol: str, analysis: dict, chart_path: str, wins: int, total: int):
+def send_telegram(symbol: str, analysis: dict, chart_path: str,
+                  conditions: list, daily_trend: str, wins: int, total: int):
     d     = analysis["direction"]
     emoji = "🟢" if d == "LONG" else "🔴"
     conf  = analysis.get("confidence", 0)
     stars = "⭐" * min(conf, 5)
-
-    # Win rate
-    if total >= 5:
-        wr_pct  = round(wins / total * 100)
-        wr_line = f"📈 *Win Rate:* `{wr_pct}%` _{wins}/{total} setups similares_\n"
-    else:
-        wr_line = f"📈 *Win Rate:* _dados insuficientes ({total} amostras)_\n"
+    icon  = {"BULLISH":"📈","BEARISH":"📉","NEUTRAL":"➡️"}.get(daily_trend,"")
+    wr    = f"📈 *Win Rate:* `{round(wins/total*100)}%` _{wins}/{total}_\n" if total >= 5 else ""
+    conds = "\n".join(f"   ✅ {c}" for c in conditions[:5])
 
     caption = (
         f"{emoji} *{symbol} — {d}*  {stars}\n"
-        f"⏱ `{TIMEFRAME.upper()}`  •  {datetime.now(timezone.utc).strftime('%H:%M UTC')}\n\n"
-        f"📌 *Setup:* {analysis.get('setup_name','')}\n\n"
+        f"⏱ `4H`  •  {datetime.now(timezone.utc).strftime('%H:%M UTC')}\n"
+        f"{icon} *Daily:* `{daily_trend}`\n\n"
+        f"📌 *Setup:* {analysis.get('setup_name','')}\n"
+        f"*Confluência ({len(conditions)} sinais):*\n{conds}\n\n"
         f"💰 *Entrada:*  `{analysis.get('entry_zone','')}`\n"
         f"🛑 *Stop Loss:* `{analysis.get('stop_loss','')}`\n"
         f"🎯 *TP1:*  `{analysis.get('take_profit_1','')}`\n"
         f"🎯 *TP2:*  `{analysis.get('take_profit_2','')}`\n"
         f"📊 *R:R:*  `{analysis.get('risk_reward','')}`\n"
         f"⭐ *Confiança:* `{conf}/10`\n"
-        + wr_line +
+        + wr +
         f"\n📝 _{analysis.get('analysis','')}_\n\n"
         f"⚠️ _Não é conselho financeiro. DYOR._"
     )
-
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto"
     with open(chart_path, "rb") as fh:
-        r = requests.post(
-            url,
+        r = requests.post(url,
             data={"chat_id": TELEGRAM_CHAT_ID, "caption": caption, "parse_mode": "Markdown"},
-            files={"photo": fh},
-            timeout=30,
-        )
+            files={"photo": fh}, timeout=30)
     log.info(f"Telegram: {r.status_code}")
 
 # ─── Main ─────────────────────────────────────────────────────────────────────
 
 def main():
     if not ANTHROPIC_API_KEY:
-        log.error("ANTHROPIC_API_KEY não definida")
-        return
+        log.error("ANTHROPIC_API_KEY não definida"); return
 
-    log.info(f"=== Crypto Scanner — {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M')} UTC ===")
+    log.info(f"=== Crypto Scanner PRO — {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M')} UTC ===")
 
     for symbol in PAIRS:
         try:
             log.info(f"A escanear {symbol}...")
-            df = fetch_ohlcv(symbol)
+
+            df = fetch_4h(symbol)
             df = add_indicators(df)
 
-            fresh, trigger = is_fresh_setup(df)
-            if not fresh:
-                log.info(f"  Sem setup fresco")
-                continue
+            daily_trend = get_daily_trend(symbol)
+            log.info(f"  Daily: {daily_trend}")
 
-            log.info(f"  Setup detetado: {trigger}")
-            chart = generate_chart(df, symbol)
+            supports, resistances = find_sr_levels(df)
+            log.info(f"  S/R: {len(supports)} suportes, {len(resistances)} resistências")
+
+            score, conditions, direction = check_confluence(df, daily_trend, supports, resistances)
+            log.info(f"  Confluência: {score} condições → {direction}")
+
+            if not conditions:
+                log.info(f"  ❌ Insuficiente ({score}/{MIN_CONFLUENCE})"); continue
+
+            log.info(f"  Condições: {conditions}")
+
+            wins, total = quick_backtest(df, direction)
+            wr_info = f"{wins}/{total} ({round(wins/total*100) if total else 0}%)" if total else "sem dados"
+            log.info(f"  Backtest: {wr_info}")
+
+            chart = generate_chart(df, symbol, supports, resistances, daily_trend)
 
             log.info(f"  A analisar com Claude...")
-            # Calcula win rate antes de chamar Claude (mais rápido)
-            # Usa direção provisória baseada no trigger
-            prov_dir = "LONG" if any(k in trigger.lower() for k in ["bullish", "oversold", "inferior"]) else "SHORT"
-            wins, total = quick_backtest(df, prov_dir)
-            winrate_info = f"{wins}/{total} ({round(wins/total*100) if total else 0}%)" if total else "sem dados"
-            log.info(f"  Backtest: {winrate_info} ({prov_dir})")
+            result = analyze(df, symbol, chart, conditions, direction,
+                             daily_trend, supports, resistances, wr_info)
 
-            result = analyze(df, symbol, chart, trigger, winrate_info)
+            conf  = result.get("confidence", 0)
+            has_s = result.get("has_signal", False)
+            final = result.get("direction", direction)
+            log.info(f"  Claude: {final} | {conf}/10 | Sinal: {has_s}")
 
-            conf = result.get("confidence", 0)
-            has_signal = result.get("has_signal", False)
-            direction  = result.get("direction", prov_dir)
-            log.info(f"  Resultado: {direction} | Confiança: {conf}/10 | Sinal: {has_signal}")
-
-            if has_signal and conf >= 7:
-                # Recalcula win rate com direção correcta do Claude
-                if direction != prov_dir:
-                    wins, total = quick_backtest(df, direction)
-                log.info(f"  *** SINAL ENVIADO para Telegram ***")
-                send_telegram(symbol, result, chart, wins, total)
+            if has_s and conf >= MIN_CONFIDENCE:
+                if final != direction:
+                    wins, total = quick_backtest(df, final)
+                log.info(f"  *** SINAL → Telegram ***")
+                send_telegram(symbol, result, chart, conditions, daily_trend, wins, total)
             else:
-                log.info(f"  Setup descartado (qualidade insuficiente)")
+                log.info(f"  ❌ Descartado ({conf}/10 < {MIN_CONFIDENCE})")
 
         except Exception as e:
-            log.error(f"  Erro com {symbol}: {e}", exc_info=True)
+            log.error(f"  Erro {symbol}: {e}", exc_info=True)
 
     log.info("=== Scan concluído ===")
-
 
 if __name__ == "__main__":
     main()
