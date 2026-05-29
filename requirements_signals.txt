@@ -1,0 +1,7 @@
+anthropic
+ccxt
+pandas
+pandas-ta
+mplfinance
+matplotlib
+requests
