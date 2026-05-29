@@ -39,7 +39,7 @@ log = logging.getLogger(__name__)
 # ─── 1. Dados ─────────────────────────────────────────────────────────────────
 
 def fetch_ohlcv(symbol: str) -> pd.DataFrame:
-    exchange = ccxt.binance({"enableRateLimit": True})
+    exchange = ccxt.bybit({"enableRateLimit": True})
     raw = exchange.fetch_ohlcv(symbol, TIMEFRAME, limit=LIMIT)
     df = pd.DataFrame(raw, columns=["ts", "open", "high", "low", "close", "volume"])
     df["ts"] = pd.to_datetime(df["ts"], unit="ms", utc=True)
