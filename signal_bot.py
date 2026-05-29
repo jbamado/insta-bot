@@ -10,7 +10,7 @@ Envia gráfico + análise para Telegram
 import os, io, json, logging, base64
 from datetime import datetime, timezone
 
-import ccxt
+import yfinance as yf
 import pandas as pd
 import pandas_ta as ta
 import matplotlib
@@ -39,12 +39,26 @@ log = logging.getLogger(__name__)
 # ─── 1. Dados ─────────────────────────────────────────────────────────────────
 
 def fetch_ohlcv(symbol: str) -> pd.DataFrame:
-    exchange = ccxt.bybit({"enableRateLimit": True})
-    raw = exchange.fetch_ohlcv(symbol, TIMEFRAME, limit=LIMIT)
-    df = pd.DataFrame(raw, columns=["ts", "open", "high", "low", "close", "volume"])
-    df["ts"] = pd.to_datetime(df["ts"], unit="ms", utc=True)
-    df.set_index("ts", inplace=True)
-    return df
+    # BTC/USDT → BTC-USD para yfinance
+    ticker = symbol.split("/")[0] + "-USD"
+    raw = yf.download(ticker, period="60d", interval="1h", progress=False, auto_adjust=True)
+
+    # yfinance às vezes devolve MultiIndex
+    if isinstance(raw.columns, pd.MultiIndex):
+        raw.columns = raw.columns.droplevel(1)
+
+    raw.columns = [c.lower() for c in raw.columns]
+
+    # Resample 1h → 4h
+    df = raw.resample("4h").agg({
+        "open":   "first",
+        "high":   "max",
+        "low":    "min",
+        "close":  "last",
+        "volume": "sum",
+    }).dropna()
+
+    return df.tail(LIMIT)
 
 # ─── 2. Indicadores ───────────────────────────────────────────────────────────
 
