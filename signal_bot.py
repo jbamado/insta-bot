@@ -582,6 +582,17 @@ So has_signal=true se confidence >= 7. Se rigoroso."""
 
 # ─── 9. Telegram ──────────────────────────────────────────────────────────────
 
+def send_telegram_text(message: str):
+    """Envia mensagem de texto simples para Telegram."""
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    try:
+        r = requests.post(url,
+            data={"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "Markdown"},
+            timeout=15)
+        log.info(f"Telegram text: {r.status_code}")
+    except Exception as e:
+        log.warning(f"Erro telegram text: {e}")
+
 def send_telegram(symbol: str, analysis: dict, chart_path: str,
                   conditions: list, daily_trend: str, wins: int, total: int):
     d     = analysis["direction"]
@@ -605,7 +616,8 @@ def send_telegram(symbol: str, analysis: dict, chart_path: str,
         f"📊 *R:R:*  `{analysis.get('risk_reward','')}`\n"
         f"⭐ *Confianca:* `{conf}/10`\n"
         + wr +
-        f"\n📝 _{analysis.get('analysis','')}_\n\n"
+        f"\n🔄 *Gestao:* Fechar 50% em TP1 + SL para break-even\n"
+        f"📝 _{analysis.get('analysis','')}_\n\n"
         f"⚠️ _Nao e conselho financeiro. DYOR._"
     )
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto"
@@ -615,6 +627,179 @@ def send_telegram(symbol: str, analysis: dict, chart_path: str,
             files={"photo": fh}, timeout=30)
     log.info(f"Telegram: {r.status_code}")
 
+# ─── 10. Gestão de Posições (Trailing SL + Partial TP1) ──────────────────────
+
+POSITIONS_FILE = "positions.json"
+
+def load_positions() -> list:
+    """Carrega posições abertas do ficheiro JSON."""
+    if not os.path.exists(POSITIONS_FILE):
+        return []
+    try:
+        with open(POSITIONS_FILE, "r") as f:
+            return json.load(f)
+    except Exception:
+        return []
+
+def save_positions(positions: list):
+    """Guarda posições abertas no ficheiro JSON."""
+    with open(POSITIONS_FILE, "w") as f:
+        json.dump(positions, f, indent=2, default=str)
+
+def add_position(symbol: str, direction: str, entry: float, sl: float,
+                  tp1: float, tp2: float, confidence: int):
+    """Regista nova posição para monitorização."""
+    positions = load_positions()
+    # Evitar duplicados — um sinal por símbolo de cada vez
+    positions = [p for p in positions if p["symbol"] != symbol]
+    position = {
+        "symbol":         symbol,
+        "direction":      direction,
+        "entry":          entry,
+        "sl":             sl,
+        "sl_original":    sl,
+        "tp1":            tp1,
+        "tp2":            tp2,
+        "confidence":     confidence,
+        "tp1_hit":        False,
+        "size_remaining": 1.0,    # 1.0 = 100%; 0.5 depois de fechar metade em TP1
+        "be_moved":       False,  # True quando SL movido para break-even
+        "opened_at":      datetime.now(timezone.utc).isoformat(),
+    }
+    positions.append(position)
+    save_positions(positions)
+    log.info(f"Posicao registada: {symbol} {direction} @ {entry}")
+
+def _get_current_price(symbol: str) -> float | None:
+    """Obtém preço atual via yfinance (barra de 5 min mais recente)."""
+    try:
+        raw = yf.download(_ticker(symbol), period="1d", interval="5m",
+                          progress=False, auto_adjust=True)
+        if raw.empty:
+            return None
+        if isinstance(raw.columns, pd.MultiIndex):
+            raw.columns = raw.columns.droplevel(1)
+        raw.columns = [c.lower() for c in raw.columns]
+        return float(raw.iloc[-1]["close"])
+    except Exception as e:
+        log.warning(f"Preco {symbol}: {e}")
+        return None
+
+def monitor_positions():
+    """
+    Executa a cada ciclo de scan. Para cada posição aberta:
+      - Se SL atingido   → alerta, remove posição
+      - Se TP1 atingido  → alerta 50% close, move SL para break-even
+      - Se TP2 atingido  → alerta trade completo, remove posição
+    """
+    positions = load_positions()
+    if not positions:
+        return
+
+    log.info(f"A monitorizar {len(positions)} posicao(oes) abertas...")
+    updated = []
+
+    for pos in positions:
+        symbol    = pos["symbol"]
+        direction = pos["direction"]
+        entry     = float(pos["entry"])
+        sl        = float(pos["sl"])
+        tp1       = float(pos["tp1"])
+        tp2       = float(pos["tp2"])
+        tp1_hit   = pos.get("tp1_hit", False)
+        be_moved  = pos.get("be_moved", False)
+
+        price = _get_current_price(symbol)
+        if price is None:
+            log.warning(f"  {symbol}: sem preco — a manter posicao")
+            updated.append(pos)
+            continue
+
+        log.info(f"  {symbol} {direction}: preco={price:,.2f} | "
+                 f"SL={sl:,.2f} | TP1={tp1:,.2f} | TP2={tp2:,.2f}")
+
+        if direction == "LONG":
+            sl_hit  = price <= sl
+            tp2_hit = price >= tp2
+            tp1_now = price >= tp1 and not tp1_hit
+
+        else:  # SHORT
+            sl_hit  = price >= sl
+            tp2_hit = price <= tp2
+            tp1_now = price <= tp1 and not tp1_hit
+
+        # ── Stop Loss ─────────────────────────────────────────────────────────
+        if sl_hit:
+            if be_moved:
+                # SL já está em break-even → saímos com os 50% do TP1 garantidos
+                msg = (
+                    f"⚠️ *{symbol} — SL Break-even*\n"
+                    f"Preco: `{price:,.2f}` | SL (BE): `{sl:,.2f}`\n\n"
+                    f"✅ 50% foi fechado em TP1 — lucro garantido\n"
+                    f"Os restantes 50% saem ao break-even (0%)\n"
+                    f"Trade encerrado."
+                )
+            else:
+                pnl = ((sl - entry) / entry * 100) if direction == "LONG" \
+                      else ((entry - sl) / entry * 100)
+                msg = (
+                    f"🔴 *{symbol} — STOP LOSS*\n"
+                    f"Entrada: `{entry:,.2f}` | SL: `{sl:,.2f}` | Preco: `{price:,.2f}`\n"
+                    f"P&L: `{pnl:+.1f}%`\n"
+                    f"Trade encerrado."
+                )
+            send_telegram_text(msg)
+            log.info(f"  {symbol}: SL atingido — removida")
+            continue  # não adicionar à lista updated
+
+        # ── Take Profit 2 ─────────────────────────────────────────────────────
+        elif tp2_hit:
+            pnl2 = ((tp2 - entry) / entry * 100) if direction == "LONG" \
+                   else ((entry - tp2) / entry * 100)
+            pnl1 = ((tp1 - entry) / entry * 100) if direction == "LONG" \
+                   else ((entry - tp1) / entry * 100)
+            avg  = (pnl1 * 0.5 + pnl2 * 0.5) if tp1_hit else pnl2
+            msg = (
+                f"🏆 *{symbol} — TP2 ATINGIDO!*\n"
+                f"Entrada: `{entry:,.2f}` | TP2: `{tp2:,.2f}` | Preco: `{price:,.2f}`\n\n"
+                + (f"✅ 50% fechado em TP1: `+{pnl1:.1f}%`\n" if tp1_hit else "") +
+                f"✅ 50% fechado em TP2: `+{pnl2:.1f}%`\n"
+                f"📊 P&L medio: `+{avg:.1f}%`\n\n"
+                f"Trade completo!"
+            )
+            send_telegram_text(msg)
+            log.info(f"  {symbol}: TP2 atingido — trade completo!")
+            continue
+
+        # ── Take Profit 1 (primeira vez) ──────────────────────────────────────
+        elif tp1_now:
+            pnl1 = ((tp1 - entry) / entry * 100) if direction == "LONG" \
+                   else ((entry - tp1) / entry * 100)
+            msg = (
+                f"🎯 *{symbol} — TP1 ATINGIDO!*\n"
+                f"Entrada: `{entry:,.2f}` | TP1: `{tp1:,.2f}` | Preco: `{price:,.2f}`\n\n"
+                f"✅ Fechar *50%* da posicao agora (`+{pnl1:.1f}%`)\n"
+                f"🔄 Mover SL para break-even: `{entry:,.2f}`\n"
+                f"⏳ Aguardar TP2 `{tp2:,.2f}` com risco zero!"
+            )
+            send_telegram_text(msg)
+            log.info(f"  {symbol}: TP1 atingido — partial close 50%, SL -> BE")
+
+            # Actualizar posição
+            pos["tp1_hit"]        = True
+            pos["size_remaining"] = 0.5
+            pos["sl"]             = entry   # break-even
+            pos["be_moved"]       = True
+            updated.append(pos)
+
+        else:
+            # Posição ainda aberta sem evento
+            updated.append(pos)
+
+    save_positions(updated)
+    if updated:
+        log.info(f"Posicoes ativas: {len(updated)}")
+
 # ─── Main ─────────────────────────────────────────────────────────────────────
 
 def main():
@@ -622,6 +807,9 @@ def main():
         log.error("ANTHROPIC_API_KEY nao definida"); return
 
     log.info(f"=== Crypto Scanner PRO v3 — {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M')} UTC ===")
+
+    # ── Primeiro: monitorizar posições abertas ────────────────────────────────
+    monitor_positions()
 
     for symbol in PAIRS:
         try:
@@ -684,6 +872,10 @@ def main():
 
                 log.info(f"  *** SINAL -> Telegram ***")
                 send_telegram(symbol, result, chart, conditions, daily_trend, wins, total)
+
+                # Registar posição para monitorização (trailing SL + partial TP)
+                if entry and sl and tp1 and tp2:
+                    add_position(symbol, final, entry, sl, tp1, tp2, conf)
 
             else:
                 log.info(f"  Descartado ({conf}/10 < {MIN_CONFIDENCE})")
