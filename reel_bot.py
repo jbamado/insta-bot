@@ -2,11 +2,11 @@
 """
 reel_bot.py — Daily Good News Instagram Reel Generator
 =======================================================
-Fetches positive news → Claude scripts it → gTTS voice →
-Pexels background video → FFmpeg assembly → Make.com → Instagram Reel
+Fetches positive news → Claude scripts it → ElevenLabs/gTTS voice →
+Pexels background video → Pixabay music → FFmpeg assembly → Make.com → Instagram Reel
 """
 
-import os, json, re, textwrap, requests, subprocess, tempfile
+import os, json, re, textwrap, random, requests, subprocess, tempfile
 from pathlib import Path
 from datetime import datetime, timezone
 
@@ -16,9 +16,13 @@ from PIL import Image, ImageDraw, ImageFont
 import anthropic
 
 # ── Config ────────────────────────────────────────────────────────────────────
-PEXELS_API_KEY    = os.getenv("PEXELS_API_KEY", "")
-ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
-MAKE_REEL_WEBHOOK = os.getenv("MAKE_REEL_WEBHOOK", "")
+PEXELS_API_KEY      = os.getenv("PEXELS_API_KEY", "")
+ANTHROPIC_API_KEY   = os.getenv("ANTHROPIC_API_KEY", "")
+MAKE_REEL_WEBHOOK   = os.getenv("MAKE_REEL_WEBHOOK", "")
+ELEVENLABS_API_KEY  = os.getenv("ELEVENLABS_API_KEY", "")   # optional — free at elevenlabs.io
+PIXABAY_API_KEY     = os.getenv("PIXABAY_API_KEY", "")       # optional — free at pixabay.com/api
+
+ELEVENLABS_VOICE_ID = "EXAVITQu4vr4xnSDxMaL"  # Sarah — warm, natural English voice
 
 REEL_W, REEL_H = 1080, 1920   # 9:16 vertical
 
@@ -55,22 +59,23 @@ def prepare_script(news_items: list[dict]) -> dict:
     client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
     news_text = "\n".join(f"- {n['title']}" for n in news_items)
 
-    prompt = f"""You create warm, uplifting 30-second Instagram Reels about good news from around the world.
+    prompt = f"""You are a viral Instagram Reel creator for a Good News page with 50k+ followers.
+Your reels are warm, emotional, and make people stop scrolling.
 
-From these stories, pick the MOST heartwarming one:
+Pick the MOST heartwarming story from this list:
 {news_text}
 
 Write the reel content. Reply ONLY in valid JSON — no markdown, no explanation:
 {{
-  "title": "SHORT PUNCHY TITLE IN CAPS (max 6 words)",
-  "narration": "Exactly 3 warm sentences read aloud. 55-65 words total. Emotional, positive, inspiring.",
-  "video_query": "2-3 word Pexels video search (e.g. 'sunrise ocean', 'children laughing', 'community helping')",
-  "caption": "2 short engaging lines for Instagram",
-  "hashtags": "#goodnews #positivevibes #hope #inspiration #goodthings #spreadlove #uplift"
+  "title": "PUNCHY TITLE IN CAPS — max 5 words, creates curiosity or emotion",
+  "narration": "3 sentences, 55-65 words total. Start with something that hooks immediately. Be warm, emotional, conversational — like talking to a friend. End with a hopeful message.",
+  "video_query": "3-4 word Pexels search for CINEMATIC, EMOTIONAL footage (e.g. 'happy family reunion', 'elderly couple dancing', 'child first steps', 'volunteers building homes', 'sunrise mountain peaceful'). Pick something visually stunning that matches the story emotion.",
+  "caption": "2 punchy lines that make people want to share. Use 1-2 emojis.",
+  "hashtags": "#goodnews #positivevibes #hope #inspiration #goodthings #spreadlove #uplift #makeyourday #feelgood #bethechange"
 }}"""
 
     msg = client.messages.create(
-        model="claude-opus-4-5", max_tokens=450,
+        model="claude-opus-4-5", max_tokens=500,
         messages=[{"role": "user", "content": prompt}]
     )
     raw = msg.content[0].text.strip()
@@ -81,12 +86,40 @@ Write the reel content. Reply ONLY in valid JSON — no markdown, no explanation
     print(f"  Query: {result['video_query']}")
     return result
 
-# ── 3. Voice (gTTS) ───────────────────────────────────────────────────────────
+# ── 3. Voice ──────────────────────────────────────────────────────────────────
 
 def generate_voice(text: str, output_path: str):
+    """Try ElevenLabs (natural voice) first, fall back to gTTS."""
+    if ELEVENLABS_API_KEY:
+        try:
+            print("  Using ElevenLabs voice...")
+            r = requests.post(
+                f"https://api.elevenlabs.io/v1/text-to-speech/{ELEVENLABS_VOICE_ID}",
+                headers={
+                    "xi-api-key": ELEVENLABS_API_KEY,
+                    "Content-Type": "application/json"
+                },
+                json={
+                    "text": text,
+                    "model_id": "eleven_multilingual_v2",
+                    "voice_settings": {"stability": 0.45, "similarity_boost": 0.80}
+                },
+                timeout=60
+            )
+            if r.status_code == 200:
+                with open(output_path, "wb") as f:
+                    f.write(r.content)
+                print(f"  ElevenLabs voice saved ({Path(output_path).stat().st_size // 1024} KB)")
+                return
+            print(f"  ElevenLabs error: {r.status_code} — {r.text[:100]}")
+        except Exception as e:
+            print(f"  ElevenLabs failed: {e}")
+
+    # Fallback: gTTS
+    print("  Using gTTS fallback...")
     tts = gTTS(text=text, lang="en", slow=False)
     tts.save(output_path)
-    print(f"  Voice saved ({Path(output_path).stat().st_size // 1024} KB)")
+    print(f"  gTTS voice saved ({Path(output_path).stat().st_size // 1024} KB)")
 
 def get_audio_duration(path: str) -> float:
     r = subprocess.run(
@@ -95,102 +128,213 @@ def get_audio_duration(path: str) -> float:
     )
     return float(json.loads(r.stdout)["format"]["duration"])
 
-# ── 4. Pexels Video ───────────────────────────────────────────────────────────
+# ── 4. Background Music (Pixabay) ─────────────────────────────────────────────
+
+def get_background_music(tmp_dir: Path) -> str | None:
+    """Download a royalty-free background track from Pixabay."""
+    # Check if local file exists first
+    local = Path("music/background.mp3")
+    if local.exists():
+        print(f"  Using local music file")
+        return str(local)
+
+    if not PIXABAY_API_KEY:
+        print("  No PIXABAY_API_KEY — skipping music")
+        return None
+
+    queries = ["uplifting background", "positive happy", "inspirational soft", "warm acoustic"]
+    random.shuffle(queries)
+
+    for query in queries:
+        try:
+            r = requests.get(
+                "https://pixabay.com/api/",
+                params={
+                    "key": PIXABAY_API_KEY,
+                    "q": query,
+                    "media_type": "music",
+                    "per_page": 10,
+                    "safesearch": "true"
+                },
+                timeout=15
+            )
+            if r.status_code != 200:
+                continue
+            hits = r.json().get("hits", [])
+            if not hits:
+                continue
+            track = random.choice(hits[:5])
+            audio_url = track.get("audio", {}).get("preview", "")
+            if not audio_url:
+                # Try direct download field
+                audio_url = track.get("previewURL", track.get("url", ""))
+            if not audio_url:
+                continue
+
+            music_path = str(tmp_dir / "music.mp3")
+            download_file(audio_url, music_path)
+            print(f"  Music: '{track.get('tags', query)}'")
+            return music_path
+        except Exception as e:
+            print(f"  Music fetch error ({query}): {e}")
+
+    return None
+
+# ── 5. Pexels Video ───────────────────────────────────────────────────────────
 
 def get_pexels_video(query: str) -> str | None:
     if not PEXELS_API_KEY:
         print("  No PEXELS_API_KEY")
         return None
     headers = {"Authorization": PEXELS_API_KEY}
+
+    # Try portrait HD first, then landscape
     for orientation in ("portrait", "landscape"):
-        params = {"query": query, "per_page": 15, "orientation": orientation}
+        params = {"query": query, "per_page": 20, "orientation": orientation, "size": "large"}
         try:
             r = requests.get("https://api.pexels.com/videos/search",
                              headers=headers, params=params, timeout=15)
             if r.status_code != 200:
                 continue
-            for video in r.json().get("videos", []):
-                if video.get("duration", 0) < 10:
-                    continue
+            videos = r.json().get("videos", [])
+            # Prefer longer, higher-quality videos
+            videos = [v for v in videos if v.get("duration", 0) >= 12]
+            random.shuffle(videos[:8])  # randomise top results for variety
+            for video in videos:
                 files = sorted(video.get("video_files", []),
                                key=lambda f: f.get("height", 0), reverse=True)
                 for f in files:
-                    if 480 <= f.get("height", 0) <= 1920:
+                    h = f.get("height", 0)
+                    if 720 <= h <= 1920:    # HD minimum
                         return f["link"]
         except Exception as e:
             print(f"  Pexels error: {e}")
     return None
 
 def download_file(url: str, path: str):
-    r = requests.get(url, stream=True, timeout=60)
+    r = requests.get(url, stream=True, timeout=120)
     r.raise_for_status()
     with open(path, "wb") as f:
         for chunk in r.iter_content(8192):
             f.write(chunk)
     print(f"  Downloaded {Path(path).name} ({Path(path).stat().st_size // 1024} KB)")
 
-# ── 5. Text Overlay (PIL) ─────────────────────────────────────────────────────
+# ── 6. Text Overlay (PIL) — Cinematic Design ──────────────────────────────────
 
 def make_overlay(script: dict) -> Image.Image:
     img  = Image.new("RGBA", (REEL_W, REEL_H), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
 
-    # Dark gradient overlay for readability
+    # ── Cinematic gradient ────────────────────────────────────────────────────
+    # Dark at very top and heavy at bottom — lets the video breathe in the middle
     for y in range(REEL_H):
-        alpha = int(160 * abs(y / REEL_H - 0.5) * 2)
-        alpha = min(alpha + 60, 180)
+        frac = y / REEL_H
+        if frac < 0.20:          # top 20% — strong for header
+            alpha = int(180 * (1 - frac / 0.20))
+        elif frac < 0.50:        # middle — minimal, show the video
+            alpha = int(40 + 30 * ((frac - 0.20) / 0.30))
+        else:                    # bottom 50% — strong for narration text
+            alpha = int(70 + 190 * ((frac - 0.50) / 0.50))
+        alpha = min(alpha, 210)
         draw.line([(0, y), (REEL_W, y)], fill=(0, 0, 0, alpha))
 
-    # Load fonts
+    # ── Load fonts ────────────────────────────────────────────────────────────
     try:
-        f_title  = ImageFont.truetype(FONT_BOLD,    80)
-        f_narr   = ImageFont.truetype(FONT_REGULAR, 48)
-        f_brand  = ImageFont.truetype(FONT_BOLD,    50)
+        f_tag   = ImageFont.truetype(FONT_BOLD,    42)
+        f_title = ImageFont.truetype(FONT_BOLD,    92)
+        f_narr  = ImageFont.truetype(FONT_REGULAR, 52)
+        f_brand = ImageFont.truetype(FONT_BOLD,    48)
+        f_cta   = ImageFont.truetype(FONT_REGULAR, 38)
     except Exception:
         print("  Warning: Roboto fonts not found — using default")
-        f_title = f_narr = f_brand = ImageFont.load_default()
+        f_tag = f_title = f_narr = f_brand = f_cta = ImageFont.load_default()
 
-    # ── Title (top) ──────────────────────────────────────────────────────────
-    title_lines = textwrap.wrap(script["title"], width=16)
-    y = 140
+    PAD = 55  # horizontal padding for cards
+
+    # ── Top tag ───────────────────────────────────────────────────────────────
+    tag = "✨ GOOD NEWS ✨"
+    bbox = draw.textbbox((0, 0), tag, font=f_tag)
+    tw = bbox[2] - bbox[0]
+    draw.text(((REEL_W - tw) // 2, 90), tag, font=f_tag, fill="#FFD700")
+
+    # ── Title card (orange/warm) ──────────────────────────────────────────────
+    title_lines = textwrap.wrap(script["title"], width=14)
+    line_h_t    = 108
+    title_blk_h = len(title_lines) * line_h_t + 40
+
+    card_t = 165
+    card_b = card_t + title_blk_h
+    draw.rounded_rectangle(
+        [PAD, card_t, REEL_W - PAD, card_b],
+        radius=28,
+        fill=(220, 100, 20, 200)   # deep orange
+    )
+    # Thin gold border
+    draw.rounded_rectangle(
+        [PAD, card_t, REEL_W - PAD, card_b],
+        radius=28,
+        outline=(255, 210, 0, 200),
+        width=3
+    )
+
+    ty = card_t + 20
     for line in title_lines:
         bbox = draw.textbbox((0, 0), line, font=f_title)
-        w    = bbox[2] - bbox[0]
-        x    = (REEL_W - w) // 2
-        # Shadow
-        draw.text((x + 3, y + 3), line, font=f_title, fill=(0, 0, 0, 200))
-        draw.text((x, y),         line, font=f_title, fill="white")
-        y += 100
+        tw = bbox[2] - bbox[0]
+        tx = (REEL_W - tw) // 2
+        draw.text((tx + 3, ty + 3), line, font=f_title, fill=(0, 0, 0, 150))   # shadow
+        draw.text((tx, ty),         line, font=f_title, fill="white")
+        ty += line_h_t
 
-    # ── Narration (centre) ───────────────────────────────────────────────────
-    narr_lines = textwrap.wrap(script["narration"], width=28)
-    line_h     = 68
-    total_h    = len(narr_lines) * line_h
-    y          = (REEL_H - total_h) // 2 - 40
+    # ── Narration card (dark, bottom area) ───────────────────────────────────
+    narr_lines  = textwrap.wrap(script["narration"], width=26)
+    line_h_n    = 74
+    narr_blk_h  = len(narr_lines) * line_h_n + 44
 
+    ncard_b = REEL_H - 250
+    ncard_t = ncard_b - narr_blk_h
+    draw.rounded_rectangle(
+        [PAD, ncard_t, REEL_W - PAD, ncard_b],
+        radius=28,
+        fill=(10, 10, 20, 195)
+    )
+    draw.rounded_rectangle(
+        [PAD, ncard_t, REEL_W - PAD, ncard_b],
+        radius=28,
+        outline=(255, 255, 255, 60),
+        width=2
+    )
+
+    ny = ncard_t + 22
     for line in narr_lines:
         bbox = draw.textbbox((0, 0), line, font=f_narr)
-        w    = bbox[2] - bbox[0]
-        x    = (REEL_W - w) // 2
-        draw.text((x + 2, y + 2), line, font=f_narr, fill=(0, 0, 0, 180))
-        draw.text((x, y),         line, font=f_narr, fill="white")
-        y += line_h
+        tw = bbox[2] - bbox[0]
+        tx = (REEL_W - tw) // 2
+        draw.text((tx + 2, ny + 2), line, font=f_narr, fill=(0, 0, 0, 130))    # shadow
+        draw.text((tx, ny),         line, font=f_narr, fill=(255, 255, 255, 240))
+        ny += line_h_n
 
-    # ── Branding (bottom) ────────────────────────────────────────────────────
-    brand = "Good News Today ❤️"
+    # ── Branding ──────────────────────────────────────────────────────────────
+    brand = "🌍 Good News Today"
     bbox  = draw.textbbox((0, 0), brand, font=f_brand)
-    w     = bbox[2] - bbox[0]
-    x     = (REEL_W - w) // 2
-    draw.text((x + 2, REEL_H - 178), brand, font=f_brand, fill=(0, 0, 0, 180))
-    draw.text((x,     REEL_H - 180), brand, font=f_brand, fill="#FFD700")
+    tw    = bbox[2] - bbox[0]
+    bx    = (REEL_W - tw) // 2
+    draw.text((bx + 2, REEL_H - 198), brand, font=f_brand, fill=(0, 0, 0, 160))
+    draw.text((bx,     REEL_H - 200), brand, font=f_brand, fill="#FFD700")
+
+    cta  = "Follow for daily good news! 💛"
+    bbox = draw.textbbox((0, 0), cta, font=f_cta)
+    tw   = bbox[2] - bbox[0]
+    draw.text(((REEL_W - tw) // 2, REEL_H - 135), cta, font=f_cta,
+              fill=(255, 255, 255, 210))
 
     return img
 
-# ── 6. FFmpeg Assembly ────────────────────────────────────────────────────────
+# ── 7. FFmpeg Assembly ────────────────────────────────────────────────────────
 
 def assemble_reel(video_path: str, voice_path: str, overlay: Image.Image,
                   output_path: str, music_path: str | None = None):
-    duration  = get_audio_duration(voice_path) + 2.0  # 2 sec tail
+    duration  = get_audio_duration(voice_path) + 2.5   # 2.5 sec tail
     overlay_p = output_path.replace(".mp4", "_ov.png")
     overlay.save(overlay_p)
 
@@ -213,7 +357,8 @@ def assemble_reel(video_path: str, voice_path: str, overlay: Image.Image,
         inputs += ["-i", music_path]               # 3: music
         af = (
             f"[2:a]volume=1.0[voice];"
-            f"[3:a]volume=0.12,atrim=duration={duration:.2f}[music];"
+            f"[3:a]volume=0.10,atrim=duration={duration:.2f},"
+            f"afade=t=out:st={duration - 1.5:.2f}:d=1.5[music];"
             f"[voice][music]amix=inputs=2:duration=first[a]"
         )
         fc   = vf + ";" + af
@@ -226,7 +371,7 @@ def assemble_reel(video_path: str, voice_path: str, overlay: Image.Image,
         ["ffmpeg", "-y"] + inputs +
         ["-filter_complex", fc] + maps +
         ["-t", f"{duration:.2f}",
-         "-c:v", "libx264", "-preset", "fast", "-crf", "22",
+         "-c:v", "libx264", "-preset", "fast", "-crf", "20",
          "-c:a", "aac", "-b:a", "128k",
          "-r", "30", "-movflags", "+faststart",
          output_path]
@@ -243,7 +388,7 @@ def assemble_reel(video_path: str, voice_path: str, overlay: Image.Image,
     size_mb = Path(output_path).stat().st_size / 1e6
     print(f"  Reel ready: {output_path} ({size_mb:.1f} MB)")
 
-# ── 7. Upload + Make.com ──────────────────────────────────────────────────────
+# ── 8. Upload + Make.com ──────────────────────────────────────────────────────
 
 def upload_video(file_path: str) -> str:
     """Upload video — tenta vários serviços gratuitos até um funcionar."""
@@ -266,7 +411,7 @@ def upload_video(file_path: str) -> str:
     except Exception as e:
         print(f"  litterbox failed: {e}")
 
-    # 2. catbox.moe — permanente, upload anónimo (userhash vazio)
+    # 2. catbox.moe — permanente, upload anónimo
     try:
         print("  Uploading to catbox.moe...")
         with open(file_path, "rb") as f:
@@ -327,7 +472,7 @@ def send_to_make(video_url: str, script: dict):
     caption = (
         f"{script['caption']}\n\n"
         f"{script['hashtags']}\n\n"
-        f"🌟 Follow for daily good news!"
+        f"🌟 Follow @positivepulseworld for daily good news!"
     )
     r = requests.post(
         MAKE_REEL_WEBHOOK,
@@ -340,6 +485,9 @@ def send_to_make(video_url: str, script: dict):
 
 def main():
     print(f"\n=== Reel Bot — {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M')} UTC ===\n")
+    voice_engine = "ElevenLabs" if ELEVENLABS_API_KEY else "gTTS"
+    music_source = "Pixabay" if PIXABAY_API_KEY else ("local" if Path("music/background.mp3").exists() else "none")
+    print(f"  Voice: {voice_engine} | Music: {music_source}\n")
 
     # 1. News
     print("1. Fetching news...")
@@ -355,7 +503,7 @@ def main():
         tmp = Path(tmp)
 
         # 3. Voice
-        print("3. Generating voice (gTTS)...")
+        print(f"3. Generating voice ({voice_engine})...")
         voice_path = str(tmp / "voice.mp3")
         generate_voice(script["narration"], voice_path)
 
@@ -363,26 +511,29 @@ def main():
         print(f"4. Fetching Pexels video: '{script['video_query']}'...")
         video_url_pex = get_pexels_video(script["video_query"])
         if not video_url_pex:
-            print("  Trying fallback: 'sunrise nature'")
-            video_url_pex = get_pexels_video("sunrise nature")
+            print("  Trying fallback: 'sunrise nature mountains'")
+            video_url_pex = get_pexels_video("sunrise nature mountains")
         if not video_url_pex:
             print("ERROR: No Pexels video found"); return
 
         video_path = str(tmp / "bg.mp4")
         download_file(video_url_pex, video_path)
 
-        # 5. Overlay
-        print("5. Creating text overlay...")
+        # 5. Music
+        print("5. Getting background music...")
+        music_path = get_background_music(tmp)
+
+        # 6. Overlay
+        print("6. Creating text overlay...")
         overlay = make_overlay(script)
 
-        # 6. Assemble
-        print("6. Assembling reel...")
-        reel_path  = str(tmp / "reel.mp4")
-        music_path = "music/background.mp3"
+        # 7. Assemble
+        print("7. Assembling reel...")
+        reel_path = str(tmp / "reel.mp4")
         assemble_reel(video_path, voice_path, overlay, reel_path, music_path)
 
-        # 7. Upload + post
-        print("7. Uploading & posting...")
+        # 8. Upload + post
+        print("8. Uploading & posting...")
         public_url = upload_video(reel_path)
         send_to_make(public_url, script)
 
