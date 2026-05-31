@@ -59,20 +59,25 @@ def prepare_script(news_items: list[dict]) -> dict:
     client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
     news_text = "\n".join(f"- {n['title']}" for n in news_items)
 
-    prompt = f"""You create viral Instagram Reels for a Good News page.
-The voice narrates the story — text on screen is MINIMAL (just the hook title).
-Dynamic subtitles will show the narration word by word.
+    prompt = f"""You create viral Instagram Reels for a good news page. Study what @goodnews_movement (4M followers) does:
+- Stories about REAL PEOPLE doing unexpected acts of kindness
+- Titles that are EMOTIONAL not descriptive ("HE GAVE EVERYTHING" not "MAN DONATES MONEY")
+- Content people DM to friends because it made them smile or tear up
 
-Pick the MOST emotional/surprising story:
+ONLY pick stories about: acts of kindness, children doing amazing things, animals rescued,
+communities helping, underdogs winning, strangers helping strangers.
+AVOID: inventions, science facts, corporate news, statistics without a human face.
+
+Stories:
 {news_text}
 
-Reply ONLY in valid JSON — no markdown:
+Reply ONLY in valid JSON — no markdown, no explanation:
 {{
-  "title": "MAX 4 WORDS IN CAPS — shocking, emotional hook that makes people stop scrolling",
-  "narration": "Exactly 3 short punchy sentences. MAX 45 words total. Very conversational, like texting a friend. Short sentences. Each sentence should hit emotionally. NO filler words.",
-  "video_query": "3-4 words for Pexels — pick EMOTIONAL, CINEMATIC footage that matches the feeling (e.g. 'happy family hug', 'elderly man crying joy', 'crowd cheering sunset', 'children playing field')",
-  "caption": "2 lines max. Make people want to share it. End with a question or call to action.",
-  "hashtags": "#goodnews #positivevibes #hope #inspiration #goodthings #spreadlove #uplift #makeyourday #feelgood #bethechange"
+  "title": "3-4 WORDS MAX IN CAPS — emotional, stops the scroll. Focus on the FEELING not the fact. Examples: 'HE GAVE EVERYTHING', 'NOBODY EXPECTED THIS', 'SHE CHANGED 100 LIVES'",
+  "narration": "3 sentences MAX. Under 40 words. Start mid-action, no slow build. Short punchy sentences. End with hope. Sound like texting a friend about something unbelievable.",
+  "video_query": "3-4 word Pexels search matching the EMOTION (e.g. 'elderly couple embrace', 'child laughing outside', 'volunteers helping people', 'woman happy tears', 'community celebration'). Match the feeling of the story.",
+  "caption": "Line 1: Share-worthy hook with 1 emoji. Line 2: Question that invites comments.",
+  "hashtags": "#goodnews #kindness #humanity #hope #inspiration #spreadlove #feelgood #makeyourday #bethechange #positivevibes"
 }}"""
 
     msg = client.messages.create(
@@ -129,10 +134,10 @@ def get_audio_duration(path: str) -> float:
 def generate_subtitles(narration: str, voice_duration: float, output_path: str):
     """Generate ASS subtitle file — 3-4 word chunks timed evenly across narration."""
     words = narration.split()
-    chunks = [' '.join(words[i:i+4]) for i in range(0, len(words), 4)]
+    chunks = [' '.join(words[i:i+3]) for i in range(0, len(words), 3)]  # 3 words = dynamic
 
-    t_start = 0.4                              # small lead-in
-    t_end   = voice_duration - 0.8            # fade before end
+    t_start = 0.4
+    t_end   = voice_duration - 0.8
     chunk_dur = (t_end - t_start) / max(len(chunks), 1)
 
     def fmt(sec: float) -> str:
@@ -155,9 +160,10 @@ def generate_subtitles(narration: str, voice_duration: float, output_path: str):
         "ScaleX,ScaleY,Spacing,Angle,BorderStyle,Outline,Shadow,"
         "Alignment,MarginL,MarginR,MarginV,Encoding\n"
         # White text, thick black outline, bottom-centre (alignment=2), MarginV=380
-        "Style: Default,Roboto Bold,78,&H00FFFFFF,&H000000FF,"
-        "&H00000000,&H00000000,-1,0,0,0,100,100,1,0,1,6,2,"
-        "2,60,60,380,1\n\n"
+        # Font 88px, white, thick black outline (7), bold, bottom-centre, MarginV=400
+        "Style: Default,Roboto Bold,88,&H00FFFFFF,&H000000FF,"
+        "&H00000000,&H00000000,-1,0,0,0,100,100,0,0,1,7,2,"
+        "2,60,60,400,1\n\n"
         "[Events]\n"
         "Format: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text\n"
     )
