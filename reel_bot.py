@@ -76,6 +76,7 @@ Reply ONLY in valid JSON — no markdown, no explanation:
   "title": "3-4 WORDS MAX IN CAPS — emotional, stops the scroll. Focus on the FEELING not the fact. Examples: 'HE GAVE EVERYTHING', 'NOBODY EXPECTED THIS', 'SHE CHANGED 100 LIVES'",
   "narration": "3 sentences MAX. Under 40 words. Start mid-action, no slow build. Short punchy sentences. End with hope. Sound like texting a friend about something unbelievable.",
   "video_query": "3-4 word Pexels search matching the EMOTION (e.g. 'elderly couple embrace', 'child laughing outside', 'volunteers helping people', 'woman happy tears', 'community celebration'). Match the feeling of the story.",
+  "hook": "2-4 WORDS MAX — shown on screen before narration starts. Creates irresistible curiosity. Examples: 'WAIT FOR IT', 'THIS IS REAL', 'TEARS INCOMING', 'YOU NEED THIS', 'UNBELIEVABLE'",
   "caption": "Line 1: Share-worthy hook with 1 emoji. Line 2: Question that invites comments.",
   "hashtags": "#goodnews #kindness #humanity #hope #inspiration #spreadlove #feelgood #makeyourday #bethechange #positivevibes"
 }}"""
@@ -131,23 +132,22 @@ def get_audio_duration(path: str) -> float:
 
 # ── 4. Dynamic Subtitles (ASS format) ────────────────────────────────────────
 
-def generate_subtitles(narration: str, voice_duration: float, output_path: str):
-    """Generate ASS subtitle file — 3-4 word chunks timed evenly across narration."""
+def generate_subtitles(narration: str, voice_duration: float, output_path: str,
+                       hook: str = ""):
+    """ASS subtitles: 3-word chunks, fade-in, yellow/white alternating, optional hook."""
     words = narration.split()
-    chunks = [' '.join(words[i:i+3]) for i in range(0, len(words), 3)]  # 3 words = dynamic
+    chunks = [' '.join(words[i:i+3]) for i in range(0, len(words), 3)]
 
-    t_start = 0.4
+    t_start = 0.3
     t_end   = voice_duration - 0.8
     chunk_dur = (t_end - t_start) / max(len(chunks), 1)
 
     def fmt(sec: float) -> str:
         sec = max(sec, 0)
-        h = int(sec // 3600)
-        m = int((sec % 3600) // 60)
-        s = sec % 60
-        return f"{h:01d}:{m:02d}:{s:05.2f}"
+        h, r = divmod(sec, 3600)
+        m, s = divmod(r, 60)
+        return f"{int(h):01d}:{int(m):02d}:{s:05.2f}"
 
-    # ASS style — large white bold text, black outline, bottom-center
     ass = (
         "[Script Info]\n"
         "ScriptType: v4.00+\n"
@@ -159,23 +159,37 @@ def generate_subtitles(narration: str, voice_duration: float, output_path: str):
         "OutlineColour,BackColour,Bold,Italic,Underline,StrikeOut,"
         "ScaleX,ScaleY,Spacing,Angle,BorderStyle,Outline,Shadow,"
         "Alignment,MarginL,MarginR,MarginV,Encoding\n"
-        # White text, thick black outline, bottom-centre (alignment=2), MarginV=380
-        # Font 88px, white, thick black outline (7), bold, bottom-centre, MarginV=400
-        "Style: Default,Roboto Bold,88,&H00FFFFFF,&H000000FF,"
+        # White — bottom-center subtitles
+        "Style: White,Roboto Bold,88,&H00FFFFFF,&H000000FF,"
         "&H00000000,&H00000000,-1,0,0,0,100,100,0,0,1,7,2,"
-        "2,60,60,400,1\n\n"
+        "2,60,60,400,1\n"
+        # Yellow — emphasis every 3rd chunk (ASS color: AABBGGRR — yellow=&H0000FFFF)
+        "Style: Yellow,Roboto Bold,92,&H0000FFFF,&H000000FF,"
+        "&H00000000,&H00000000,-1,0,0,0,100,100,0,0,1,7,2,"
+        "2,60,60,400,1\n"
+        # Hook — appears below title card, top-aligned, for first 2s
+        "Style: Hook,Roboto Bold,76,&H00FFFFFF,&H000000FF,"
+        "&H00000000,&H00000000,-1,0,0,0,100,100,2,0,1,6,2,"
+        "8,80,80,490,1\n\n"
         "[Events]\n"
         "Format: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text\n"
     )
 
+    # Hook text shown below title card (top-aligned) for first 2 seconds
+    if hook:
+        clean = hook.upper().strip()
+        ass += f"Dialogue: 0,{fmt(0.0)},{fmt(2.0)},Hook,,0,0,0,,{{\\fad(250,350)}}{clean}\n"
+
+    # Narration chunks — fade-in, alternating yellow/white
     for i, chunk in enumerate(chunks):
         s = t_start + i * chunk_dur
-        e = s + chunk_dur + 0.05   # tiny overlap so there's no flash of empty
-        ass += f"Dialogue: 0,{fmt(s)},{fmt(e)},Default,,0,0,0,,{chunk}\n"
+        e = s + chunk_dur + 0.06
+        style = "Yellow" if i % 3 == 1 else "White"
+        ass += f"Dialogue: 0,{fmt(s)},{fmt(e)},{style},,0,0,0,,{{\\fad(110,0)}}{chunk}\n"
 
     with open(output_path, 'w', encoding='utf-8') as f:
         f.write(ass)
-    print(f"  Subtitles: {len(chunks)} chunks over {voice_duration:.1f}s")
+    print(f"  Subtitles: {len(chunks)} chunks {'+ hook' if hook else ''}")
 
 # ── 5. Pexels Video ───────────────────────────────────────────────────────────
 
@@ -323,12 +337,18 @@ def assemble_reel(video_path: str, voice_path: str, overlay: Image.Image,
     ]
 
     # Build video filter chain
+    # Warm cinematic grade: +15% saturation, slight contrast boost, warm tint
+    grade = (
+        "eq=saturation=1.15:contrast=1.04:gamma=0.94,"
+        "colorbalance=rs=0.07:gs=0.02:bs=-0.05"
+    )
+
     has_subs = subtitle_path and Path(subtitle_path).exists()
     if has_subs:
         vf = (
             f"[0:v]trim=duration={duration:.2f},setpts=PTS-STARTPTS,"
             f"scale={REEL_W}:{REEL_H}:force_original_aspect_ratio=increase,"
-            f"crop={REEL_W}:{REEL_H}[bg];"
+            f"crop={REEL_W}:{REEL_H},{grade}[bg];"
             f"[bg][1:v]overlay=0:0[bg_ov];"
             f"[bg_ov]ass='{subtitle_path}'[v]"
         )
@@ -336,7 +356,7 @@ def assemble_reel(video_path: str, voice_path: str, overlay: Image.Image,
         vf = (
             f"[0:v]trim=duration={duration:.2f},setpts=PTS-STARTPTS,"
             f"scale={REEL_W}:{REEL_H}:force_original_aspect_ratio=increase,"
-            f"crop={REEL_W}:{REEL_H}[bg];"
+            f"crop={REEL_W}:{REEL_H},{grade}[bg];"
             f"[bg][1:v]overlay=0:0[v]"
         )
 
@@ -480,10 +500,13 @@ def main():
         generate_voice(script["narration"], voice_path)
         voice_dur = get_audio_duration(voice_path)
 
-        # 4. Subtitles
+        # 4. Subtitles (with hook text)
         print("4. Generating subtitles...")
         sub_path = str(tmp / "subs.ass")
-        generate_subtitles(script["narration"], voice_dur, sub_path)
+        hook_text = script.get("hook", "")
+        generate_subtitles(script["narration"], voice_dur, sub_path, hook_text)
+        if hook_text:
+            print(f"  Hook: '{hook_text}'")
 
         # 5. Video
         print(f"5. Fetching Pexels video: '{script['video_query']}'...")
