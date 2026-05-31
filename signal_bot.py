@@ -840,6 +840,81 @@ def monitor_positions():
     if updated:
         log.info(f"Posicoes ativas: {len(updated)}")
 
+# ─── 11. Resumo Diário de Preços ──────────────────────────────────────────────
+
+LAST_SUMMARY_FILE = "last_summary.txt"
+
+def _should_send_summary() -> bool:
+    """Envia resumo apenas uma vez por dia (na primeira run após meia-noite UTC)."""
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    if os.path.exists(LAST_SUMMARY_FILE):
+        try:
+            with open(LAST_SUMMARY_FILE) as f:
+                if f.read().strip() == today:
+                    return False
+        except Exception:
+            pass
+    with open(LAST_SUMMARY_FILE, "w") as f:
+        f.write(today)
+    return True
+
+def send_daily_price_summary():
+    """Envia resumo de preços + tendência de todos os pares para Telegram."""
+    if not _should_send_summary():
+        return
+
+    log.info("A enviar resumo diario de precos...")
+    now = datetime.now(timezone.utc).strftime("%d/%m/%Y %H:%M UTC")
+
+    lines = [f"📊 *Resumo de Mercado — {now}*\n"]
+
+    trend_icons = {"BULLISH": "📈", "BEARISH": "📉", "NEUTRAL": "➡️"}
+
+    for symbol in PAIRS:
+        try:
+            ticker = _ticker(symbol)
+            raw = yf.download(ticker, period="2d", interval="1h",
+                              progress=False, auto_adjust=True)
+            if raw.empty:
+                continue
+            if isinstance(raw.columns, pd.MultiIndex):
+                raw.columns = raw.columns.droplevel(1)
+            raw.columns = [c.lower() for c in raw.columns]
+
+            price_now  = float(raw.iloc[-1]["close"])
+            price_24h  = float(raw.iloc[-25]["close"]) if len(raw) >= 25 else float(raw.iloc[0]["close"])
+            chg_pct    = (price_now - price_24h) / price_24h * 100
+            chg_icon   = "🟢" if chg_pct >= 0 else "🔴"
+
+            trend = get_daily_trend(symbol)
+            t_icon = trend_icons.get(trend, "")
+
+            coin = symbol.split("/")[0]
+            lines.append(
+                f"{chg_icon} *{coin}:* `${price_now:,.2f}`  "
+                f"({chg_pct:+.1f}%)  {t_icon} `{trend}`"
+            )
+        except Exception as e:
+            log.warning(f"Resumo {symbol}: {e}")
+
+    # Posições abertas
+    positions = load_positions()
+    if positions:
+        lines.append(f"\n📂 *Posicoes abertas: {len(positions)}*")
+        for p in positions:
+            d_icon = "🟢" if p["direction"] == "LONG" else "🔴"
+            tp1_status = "✅ TP1 ok" if p.get("tp1_hit") else "⏳ aguarda"
+            lines.append(
+                f"  {d_icon} {p['symbol']} @ `{float(p['entry']):,.2f}` — {tp1_status}"
+            )
+    else:
+        lines.append(f"\n📂 _Sem posicoes abertas_")
+
+    lines.append(f"\n⚠️ _Nao e conselho financeiro. DYOR._")
+
+    send_telegram_text("\n".join(lines))
+    log.info("Resumo diario enviado.")
+
 # ─── Main ─────────────────────────────────────────────────────────────────────
 
 def main():
@@ -848,7 +923,10 @@ def main():
 
     log.info(f"=== Crypto Scanner PRO v3 — {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M')} UTC ===")
 
-    # ── Primeiro: monitorizar posições abertas ────────────────────────────────
+    # ── Resumo diário de preços (uma vez por dia) ─────────────────────────────
+    send_daily_price_summary()
+
+    # ── Monitorizar posições abertas ──────────────────────────────────────────
     monitor_positions()
 
     for symbol in PAIRS:
