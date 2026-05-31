@@ -1069,6 +1069,12 @@ def main():
             final = result.get("direction", direction)
             log.info(f"  Claude: {final} | {conf}/10 | Sinal: {has_s}")
 
+            # Verificar se já há posição aberta para este símbolo
+            open_symbols = [p["symbol"] for p in load_positions()]
+            if symbol in open_symbols:
+                log.info(f"  Posicao ja aberta para {symbol} — sinal ignorado")
+                continue
+
             if has_s and conf >= MIN_CONFIDENCE:
                 # Extrair níveis de preço do texto do Claude
                 entry = parse_price(result.get("entry_zone"))
