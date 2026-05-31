@@ -128,56 +128,34 @@ def get_audio_duration(path: str) -> float:
     )
     return float(json.loads(r.stdout)["format"]["duration"])
 
-# ── 4. Background Music (Pixabay) ─────────────────────────────────────────────
+# ── 4. Background Music ───────────────────────────────────────────────────────
+
+def has_audio_stream(path: str) -> bool:
+    """Return True only if the file contains at least one real audio stream."""
+    try:
+        r = subprocess.run(
+            ["ffprobe", "-v", "quiet", "-select_streams", "a:0",
+             "-show_entries", "stream=codec_type", "-of", "json", path],
+            capture_output=True, text=True, check=True
+        )
+        return bool(json.loads(r.stdout).get("streams"))
+    except Exception:
+        return False
 
 def get_background_music(tmp_dir: Path) -> str | None:
-    """Download a royalty-free background track from Pixabay."""
-    # Check if local file exists first
+    """Return path to background music if available and valid audio."""
+    # 1. Local file (committed to repo as music/background.mp3)
     local = Path("music/background.mp3")
     if local.exists():
-        print(f"  Using local music file")
-        return str(local)
+        if has_audio_stream(str(local)):
+            print("  Using local music/background.mp3")
+            return str(local)
+        print("  music/background.mp3 is not valid audio — skipping")
 
-    if not PIXABAY_API_KEY:
-        print("  No PIXABAY_API_KEY — skipping music")
-        return None
-
-    queries = ["uplifting background", "positive happy", "inspirational soft", "warm acoustic"]
-    random.shuffle(queries)
-
-    for query in queries:
-        try:
-            r = requests.get(
-                "https://pixabay.com/api/",
-                params={
-                    "key": PIXABAY_API_KEY,
-                    "q": query,
-                    "media_type": "music",
-                    "per_page": 10,
-                    "safesearch": "true"
-                },
-                timeout=15
-            )
-            if r.status_code != 200:
-                continue
-            hits = r.json().get("hits", [])
-            if not hits:
-                continue
-            track = random.choice(hits[:5])
-            audio_url = track.get("audio", {}).get("preview", "")
-            if not audio_url:
-                # Try direct download field
-                audio_url = track.get("previewURL", track.get("url", ""))
-            if not audio_url:
-                continue
-
-            music_path = str(tmp_dir / "music.mp3")
-            download_file(audio_url, music_path)
-            print(f"  Music: '{track.get('tags', query)}'")
-            return music_path
-        except Exception as e:
-            print(f"  Music fetch error ({query}): {e}")
-
+    # 2. No Pixabay music API — their API only supports images/videos.
+    #    To add music: download a royalty-free MP3 from https://pixabay.com/music/
+    #    and commit it to the repo as music/background.mp3
+    print("  No music available — add music/background.mp3 to repo to enable")
     return None
 
 # ── 5. Pexels Video ───────────────────────────────────────────────────────────
@@ -352,7 +330,8 @@ def assemble_reel(video_path: str, voice_path: str, overlay: Image.Image,
         f"[bg][1:v]overlay=0:0[v]"
     )
 
-    has_music = music_path and Path(music_path).exists()
+    has_music = (music_path and Path(music_path).exists()
+                 and has_audio_stream(music_path))
     if has_music:
         inputs += ["-i", music_path]               # 3: music
         af = (
