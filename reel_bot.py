@@ -246,21 +246,44 @@ def assemble_reel(video_path: str, voice_path: str, overlay: Image.Image,
 # ── 7. Upload + Make.com ──────────────────────────────────────────────────────
 
 def upload_video(file_path: str) -> str:
-    """Upload to file.io (free, expires 1 day). Returns public URL."""
-    print("  Uploading to file.io...")
-    with open(file_path, "rb") as f:
-        r = requests.post(
-            "https://file.io",
-            files={"file": ("reel.mp4", f, "video/mp4")},
-            data={"expires": "1d"},
-            timeout=180
-        )
-    data = r.json()
-    if not data.get("success"):
-        raise RuntimeError(f"Upload failed: {data}")
-    url = data["link"]
-    print(f"  URL: {url}")
-    return url
+    """Upload video — tenta vários serviços gratuitos até um funcionar."""
+
+    # 1. 0x0.st — retorna o URL como texto simples
+    try:
+        print("  Uploading to 0x0.st...")
+        with open(file_path, "rb") as f:
+            r = requests.post(
+                "https://0x0.st",
+                files={"file": ("reel.mp4", f, "video/mp4")},
+                timeout=180
+            )
+        if r.status_code == 200 and r.text.strip().startswith("https://"):
+            url = r.text.strip()
+            print(f"  URL: {url}")
+            return url
+        print(f"  0x0.st: {r.status_code} — {r.text[:100]}")
+    except Exception as e:
+        print(f"  0x0.st failed: {e}")
+
+    # 2. Catbox.moe — fallback
+    try:
+        print("  Uploading to catbox.moe...")
+        with open(file_path, "rb") as f:
+            r = requests.post(
+                "https://catbox.moe/user/api.php",
+                data={"reqtype": "fileupload"},
+                files={"fileToUpload": ("reel.mp4", f, "video/mp4")},
+                timeout=180
+            )
+        url = r.text.strip()
+        if url.startswith("https://"):
+            print(f"  URL: {url}")
+            return url
+        print(f"  catbox.moe: {r.text[:100]}")
+    except Exception as e:
+        print(f"  catbox.moe failed: {e}")
+
+    raise RuntimeError("Todos os serviços de upload falharam")
 
 def send_to_make(video_url: str, script: dict):
     if not MAKE_REEL_WEBHOOK:
