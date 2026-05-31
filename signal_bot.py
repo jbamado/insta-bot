@@ -28,6 +28,11 @@ LIMIT          = 200
 MIN_CONFLUENCE = 2    # mínimo de condições em simultâneo
 MIN_CONFIDENCE = 7    # confiança mínima Claude para enviar alerta
 
+# ── Gestão de Risco ───────────────────────────────────────────────────────────
+ACCOUNT_BALANCE_USDT = float(os.getenv("ACCOUNT_BALANCE", "300"))  # capital total
+RISK_PER_TRADE_PCT   = 2.0   # % do capital a arriscar por trade (padrão: 2%)
+MAX_POSITION_PCT     = 15.0  # % máximo do capital por trade (evita over-exposure)
+
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 TELEGRAM_TOKEN    = os.getenv("TELEGRAM_TOKEN", "")
 TELEGRAM_CHAT_ID  = os.getenv("TELEGRAM_CHAT_ID", "")
@@ -594,7 +599,8 @@ def send_telegram_text(message: str):
         log.warning(f"Erro telegram text: {e}")
 
 def send_telegram(symbol: str, analysis: dict, chart_path: str,
-                  conditions: list, daily_trend: str, wins: int, total: int):
+                  conditions: list, daily_trend: str, wins: int, total: int,
+                  size_usdt: float = 0, risk_usdt: float = 0):
     d     = analysis["direction"]
     emoji = "🟢" if d == "LONG" else "🔴"
     conf  = analysis.get("confidence", 0)
@@ -602,6 +608,8 @@ def send_telegram(symbol: str, analysis: dict, chart_path: str,
     icon  = {"BULLISH":"📈","BEARISH":"📉","NEUTRAL":"➡️"}.get(daily_trend,"")
     wr    = f"📈 *Win Rate:* `{round(wins/total*100)}%` _{wins}/{total}_\n" if total >= 5 else ""
     conds = "\n".join(f"   ✅ {c}" for c in conditions[:5])
+    position_line = (f"💼 *Investir:* `${size_usdt:.2f}` _(risco max: `${risk_usdt:.2f}`)_\n"
+                     if size_usdt > 0 else "")
 
     caption = (
         f"{emoji} *{symbol} — {d}*  {stars}\n"
@@ -615,7 +623,7 @@ def send_telegram(symbol: str, analysis: dict, chart_path: str,
         f"🎯 *TP2:*  `{analysis.get('take_profit_2','')}`\n"
         f"📊 *R:R:*  `{analysis.get('risk_reward','')}`\n"
         f"⭐ *Confianca:* `{conf}/10`\n"
-        + wr +
+        + wr + position_line +
         f"\n🔄 *Gestao:* Fechar 50% em TP1 + SL para break-even\n"
         f"📝 _{analysis.get('analysis','')}_\n\n"
         f"⚠️ _Nao e conselho financeiro. DYOR._"
@@ -646,12 +654,29 @@ def save_positions(positions: list):
     with open(POSITIONS_FILE, "w") as f:
         json.dump(positions, f, indent=2, default=str)
 
+def calc_position_size(entry: float, sl: float) -> tuple[float, float]:
+    """
+    Calcula o tamanho da posição com base em gestão de risco:
+      - Arrisca RISK_PER_TRADE_PCT % do capital
+      - Cap: MAX_POSITION_PCT % do capital
+    Devolve (size_usdt, risk_usdt).
+    """
+    sl_distance_pct = abs(entry - sl) / entry
+    if sl_distance_pct <= 0:
+        sl_distance_pct = 0.02  # fallback 2%
+    risk_usdt    = ACCOUNT_BALANCE_USDT * (RISK_PER_TRADE_PCT / 100)
+    size_usdt    = risk_usdt / sl_distance_pct
+    max_size     = ACCOUNT_BALANCE_USDT * (MAX_POSITION_PCT / 100)
+    size_usdt    = min(size_usdt, max_size)
+    return round(size_usdt, 2), round(risk_usdt, 2)
+
 def add_position(symbol: str, direction: str, entry: float, sl: float,
                   tp1: float, tp2: float, confidence: int):
     """Regista nova posição para monitorização."""
     positions = load_positions()
     # Evitar duplicados — um sinal por símbolo de cada vez
     positions = [p for p in positions if p["symbol"] != symbol]
+    size_usdt, risk_usdt = calc_position_size(entry, sl)
     position = {
         "symbol":         symbol,
         "direction":      direction,
@@ -661,6 +686,8 @@ def add_position(symbol: str, direction: str, entry: float, sl: float,
         "tp1":            tp1,
         "tp2":            tp2,
         "confidence":     confidence,
+        "size_usdt":      size_usdt,   # valor total a investir
+        "risk_usdt":      risk_usdt,   # perda máxima se SL atingido
         "tp1_hit":        False,
         "size_remaining": 1.0,    # 1.0 = 100%; 0.5 depois de fechar metade em TP1
         "be_moved":       False,  # True quando SL movido para break-even
@@ -668,7 +695,8 @@ def add_position(symbol: str, direction: str, entry: float, sl: float,
     }
     positions.append(position)
     save_positions(positions)
-    log.info(f"Posicao registada: {symbol} {direction} @ {entry}")
+    log.info(f"Posicao registada: {symbol} {direction} @ {entry} | "
+             f"Tamanho: ${size_usdt:.2f} | Risco: ${risk_usdt:.2f}")
 
 def _get_current_price(symbol: str) -> float | None:
     """Obtém preço atual via yfinance (barra de 5 min mais recente)."""
@@ -708,6 +736,8 @@ def monitor_positions():
         tp2       = float(pos["tp2"])
         tp1_hit   = pos.get("tp1_hit", False)
         be_moved  = pos.get("be_moved", False)
+        size_usdt = float(pos.get("size_usdt", 50))
+        risk_usdt = float(pos.get("risk_usdt", size_usdt * 0.02))
 
         price = _get_current_price(symbol)
         if price is None:
@@ -731,21 +761,27 @@ def monitor_positions():
         # ── Stop Loss ─────────────────────────────────────────────────────────
         if sl_hit:
             if be_moved:
-                # SL já está em break-even → saímos com os 50% do TP1 garantidos
+                # SL em break-even — 50% do TP1 já garantido
+                tp1_pnl_pct = ((tp1 - entry) / entry * 100) if direction == "LONG" \
+                              else ((entry - tp1) / entry * 100)
+                tp1_profit  = size_usdt * 0.5 * (tp1_pnl_pct / 100)
                 msg = (
                     f"⚠️ *{symbol} — SL Break-even*\n"
-                    f"Preco: `{price:,.2f}` | SL (BE): `{sl:,.2f}`\n\n"
-                    f"✅ 50% foi fechado em TP1 — lucro garantido\n"
-                    f"Os restantes 50% saem ao break-even (0%)\n"
+                    f"Preco: `{price:,.2f}` | SL: `{sl:,.2f}`\n\n"
+                    f"✅ 50% fechado em TP1: `+${tp1_profit:.2f}`\n"
+                    f"↩️ 50% sai ao break-even: `$0.00`\n"
+                    f"💼 Resultado final: `+${tp1_profit:.2f}`\n"
                     f"Trade encerrado."
                 )
             else:
-                pnl = ((sl - entry) / entry * 100) if direction == "LONG" \
-                      else ((entry - sl) / entry * 100)
+                pnl_pct  = ((sl - entry) / entry * 100) if direction == "LONG" \
+                           else ((entry - sl) / entry * 100)
+                pnl_usdt = size_usdt * (pnl_pct / 100)
                 msg = (
                     f"🔴 *{symbol} — STOP LOSS*\n"
-                    f"Entrada: `{entry:,.2f}` | SL: `{sl:,.2f}` | Preco: `{price:,.2f}`\n"
-                    f"P&L: `{pnl:+.1f}%`\n"
+                    f"Entrada: `{entry:,.2f}` | SL: `{sl:,.2f}` | Preco: `{price:,.2f}`\n\n"
+                    f"📉 P&L: `{pnl_pct:+.1f}%`  →  `${pnl_usdt:+.2f}`\n"
+                    f"💼 Posicao: `${size_usdt:.2f}` | Risco usado: `${risk_usdt:.2f}`\n"
                     f"Trade encerrado."
                 )
             send_telegram_text(msg)
@@ -754,36 +790,40 @@ def monitor_positions():
 
         # ── Take Profit 2 ─────────────────────────────────────────────────────
         elif tp2_hit:
-            pnl2 = ((tp2 - entry) / entry * 100) if direction == "LONG" \
-                   else ((entry - tp2) / entry * 100)
-            pnl1 = ((tp1 - entry) / entry * 100) if direction == "LONG" \
-                   else ((entry - tp1) / entry * 100)
-            avg  = (pnl1 * 0.5 + pnl2 * 0.5) if tp1_hit else pnl2
+            pnl2_pct  = ((tp2 - entry) / entry * 100) if direction == "LONG" \
+                        else ((entry - tp2) / entry * 100)
+            pnl1_pct  = ((tp1 - entry) / entry * 100) if direction == "LONG" \
+                        else ((entry - tp1) / entry * 100)
+            profit_tp1 = size_usdt * 0.5 * (pnl1_pct / 100) if tp1_hit else 0
+            profit_tp2 = size_usdt * 0.5 * (pnl2_pct / 100)
+            total      = profit_tp1 + profit_tp2
             msg = (
                 f"🏆 *{symbol} — TP2 ATINGIDO!*\n"
                 f"Entrada: `{entry:,.2f}` | TP2: `{tp2:,.2f}` | Preco: `{price:,.2f}`\n\n"
-                + (f"✅ 50% fechado em TP1: `+{pnl1:.1f}%`\n" if tp1_hit else "") +
-                f"✅ 50% fechado em TP2: `+{pnl2:.1f}%`\n"
-                f"📊 P&L medio: `+{avg:.1f}%`\n\n"
+                + (f"✅ 50% em TP1 (`+{pnl1_pct:.1f}%`): `+${profit_tp1:.2f}`\n" if tp1_hit else "") +
+                f"✅ 50% em TP2 (`+{pnl2_pct:.1f}%`): `+${profit_tp2:.2f}`\n"
+                f"━━━━━━━━━━━━━━━\n"
+                f"💰 *Lucro total: `+${total:.2f}`*\n\n"
                 f"Trade completo!"
             )
             send_telegram_text(msg)
-            log.info(f"  {symbol}: TP2 atingido — trade completo!")
+            log.info(f"  {symbol}: TP2 atingido — lucro ${total:.2f}")
             continue
 
         # ── Take Profit 1 (primeira vez) ──────────────────────────────────────
         elif tp1_now:
-            pnl1 = ((tp1 - entry) / entry * 100) if direction == "LONG" \
-                   else ((entry - tp1) / entry * 100)
+            pnl1_pct  = ((tp1 - entry) / entry * 100) if direction == "LONG" \
+                        else ((entry - tp1) / entry * 100)
+            profit_tp1 = size_usdt * 0.5 * (pnl1_pct / 100)
             msg = (
                 f"🎯 *{symbol} — TP1 ATINGIDO!*\n"
                 f"Entrada: `{entry:,.2f}` | TP1: `{tp1:,.2f}` | Preco: `{price:,.2f}`\n\n"
-                f"✅ Fechar *50%* da posicao agora (`+{pnl1:.1f}%`)\n"
-                f"🔄 Mover SL para break-even: `{entry:,.2f}`\n"
-                f"⏳ Aguardar TP2 `{tp2:,.2f}` com risco zero!"
+                f"✅ Vende *50%* agora → `+{pnl1_pct:.1f}%`  (`+${profit_tp1:.2f}`)\n"
+                f"🔄 Move SL para break-even: `{entry:,.2f}`\n"
+                f"⏳ Os outros 50% correm para TP2 `{tp2:,.2f}` sem risco!"
             )
             send_telegram_text(msg)
-            log.info(f"  {symbol}: TP1 atingido — partial close 50%, SL -> BE")
+            log.info(f"  {symbol}: TP1 atingido — +${profit_tp1:.2f}, SL -> BE")
 
             # Actualizar posição
             pos["tp1_hit"]        = True
@@ -862,6 +902,12 @@ def main():
                 tp2   = parse_price(result.get("take_profit_2"))
                 log.info(f"  Niveis: Entry={entry} SL={sl} TP1={tp1} TP2={tp2}")
 
+                # Calcular tamanho de posição (gestão de risco 2%)
+                size_usdt, risk_usdt = (0, 0)
+                if entry and sl:
+                    size_usdt, risk_usdt = calc_position_size(entry, sl)
+                    log.info(f"  Tamanho: ${size_usdt:.2f} | Risco: ${risk_usdt:.2f}")
+
                 # Gera chart anotado com padrões + Entry/SL/TP para Telegram
                 chart = generate_chart_for_telegram(
                     df, symbol, supports, resistances, daily_trend,
@@ -871,7 +917,8 @@ def main():
                     wins, total = quick_backtest(df, final)
 
                 log.info(f"  *** SINAL -> Telegram ***")
-                send_telegram(symbol, result, chart, conditions, daily_trend, wins, total)
+                send_telegram(symbol, result, chart, conditions, daily_trend,
+                              wins, total, size_usdt, risk_usdt)
 
                 # Registar posição para monitorização (trailing SL + partial TP)
                 if entry and sl and tp1 and tp2:
