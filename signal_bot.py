@@ -637,7 +637,96 @@ def send_telegram(symbol: str, analysis: dict, chart_path: str,
 
 # ─── 10. Gestão de Posições (Trailing SL + Partial TP1) ──────────────────────
 
-POSITIONS_FILE = "positions.json"
+POSITIONS_FILE    = "positions.json"
+TRADE_HISTORY_FILE = "trade_history.json"
+
+def load_trade_history() -> list:
+    if not os.path.exists(TRADE_HISTORY_FILE):
+        return []
+    try:
+        with open(TRADE_HISTORY_FILE) as f:
+            return json.load(f)
+    except Exception:
+        return []
+
+def save_trade_history(history: list):
+    with open(TRADE_HISTORY_FILE, "w") as f:
+        json.dump(history, f, indent=2, default=str)
+
+def log_trade_open(symbol: str, direction: str, entry: float, sl: float,
+                   tp1: float, tp2: float, confidence: int,
+                   size_usdt: float, risk_usdt: float):
+    """Regista novo sinal no histórico de trades."""
+    history = load_trade_history()
+    history.append({
+        "id":         len(history) + 1,
+        "date_open":  datetime.now(timezone.utc).isoformat(),
+        "date_close": None,
+        "symbol":     symbol,
+        "direction":  direction,
+        "entry":      entry,
+        "sl":         sl,
+        "tp1":        tp1,
+        "tp2":        tp2,
+        "confidence": confidence,
+        "size_usdt":  size_usdt,
+        "risk_usdt":  risk_usdt,
+        "outcome":    "open",   # open / tp1 / tp2 / sl / be
+        "pnl_usdt":   0.0,
+    })
+    save_trade_history(history)
+
+def log_trade_close(symbol: str, outcome: str, pnl_usdt: float):
+    """Actualiza o resultado de um trade no histórico."""
+    history = load_trade_history()
+    for t in reversed(history):
+        if t["symbol"] == symbol and t["outcome"] == "open":
+            t["outcome"]    = outcome
+            t["pnl_usdt"]   = round(pnl_usdt, 2)
+            t["date_close"] = datetime.now(timezone.utc).isoformat()
+            break
+    save_trade_history(history)
+
+def send_trade_summary():
+    """Envia resumo de todas as trades para Telegram."""
+    history = load_trade_history()
+    if not history:
+        send_telegram_text("📋 *Histórico de Trades*\n\n_Ainda sem trades registados._")
+        return
+
+    closed = [t for t in history if t["outcome"] != "open"]
+    open_  = [t for t in history if t["outcome"] == "open"]
+
+    total_pnl  = sum(t["pnl_usdt"] for t in closed)
+    wins       = sum(1 for t in closed if t["pnl_usdt"] > 0)
+    losses     = sum(1 for t in closed if t["pnl_usdt"] <= 0)
+    win_rate   = round(wins / len(closed) * 100) if closed else 0
+
+    lines = [f"📋 *Histórico de Trades*\n"]
+
+    if closed:
+        lines.append(f"📊 *Resumo:* {len(closed)} trades fechados")
+        lines.append(f"✅ Ganhos: {wins}  |  ❌ Perdas: {losses}  |  Win Rate: {win_rate}%")
+        pnl_icon = "💰" if total_pnl >= 0 else "📉"
+        lines.append(f"{pnl_icon} *P&L Total: `{'+'if total_pnl>=0 else ''}{total_pnl:.2f} USDT`*\n")
+
+        lines.append("*Últimas 10 trades:*")
+        for t in closed[-10:]:
+            d = t["date_open"][:10]
+            icon = "✅" if t["pnl_usdt"] > 0 else ("⚠️" if t["outcome"] == "be" else "❌")
+            outcome_label = {"tp1":"TP1","tp2":"TP2","sl":"SL","be":"BE"}.get(t["outcome"], t["outcome"])
+            lines.append(
+                f"{icon} `{d}` {t['symbol']} {t['direction']} → "
+                f"*{outcome_label}* `{'+'if t['pnl_usdt']>=0 else ''}{t['pnl_usdt']:.2f}$`"
+            )
+
+    if open_:
+        lines.append(f"\n⏳ *{len(open_)} trade(s) aberta(s):*")
+        for t in open_:
+            d = t["date_open"][:10]
+            lines.append(f"  🟡 `{d}` {t['symbol']} {t['direction']} @ `{t['entry']:,.2f}`")
+
+    send_telegram_text("\n".join(lines))
 
 def load_positions() -> list:
     """Carrega posições abertas do ficheiro JSON."""
@@ -785,6 +874,9 @@ def monitor_positions():
                     f"Trade encerrado."
                 )
             send_telegram_text(msg)
+            outcome_code = "be" if be_moved else "sl"
+            pnl_final    = profit_tp1 if be_moved else size_usdt * (((sl - entry) / entry * 100 if direction == "LONG" else (entry - sl) / entry * 100) / 100)
+            log_trade_close(symbol, outcome_code, pnl_final)
             log.info(f"  {symbol}: SL atingido — removida")
             continue  # não adicionar à lista updated
 
@@ -807,6 +899,7 @@ def monitor_positions():
                 f"Trade completo!"
             )
             send_telegram_text(msg)
+            log_trade_close(symbol, "tp2", total)
             log.info(f"  {symbol}: TP2 atingido — lucro ${total:.2f}")
             continue
 
@@ -896,6 +989,10 @@ def send_daily_price_summary():
             )
         except Exception as e:
             log.warning(f"Resumo {symbol}: {e}")
+
+    # Resumo semanal ao domingo
+    if datetime.now(timezone.utc).weekday() == 6:  # 6 = domingo
+        send_trade_summary()
 
     # Posições abertas
     positions = load_positions()
@@ -1001,6 +1098,8 @@ def main():
                 # Registar posição para monitorização (trailing SL + partial TP)
                 if entry and sl and tp1 and tp2:
                     add_position(symbol, final, entry, sl, tp1, tp2, conf)
+                    log_trade_open(symbol, final, entry, sl, tp1, tp2,
+                                   conf, size_usdt, risk_usdt)
 
             else:
                 log.info(f"  Descartado ({conf}/10 < {MIN_CONFIDENCE})")
