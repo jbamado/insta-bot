@@ -248,40 +248,75 @@ def assemble_reel(video_path: str, voice_path: str, overlay: Image.Image,
 def upload_video(file_path: str) -> str:
     """Upload video — tenta vários serviços gratuitos até um funcionar."""
 
-    # 1. 0x0.st — retorna o URL como texto simples
+    # 1. litterbox.catbox.moe — temporário 72h, sem conta necessária
+    try:
+        print("  Uploading to litterbox.catbox.moe...")
+        with open(file_path, "rb") as f:
+            r = requests.post(
+                "https://litterbox.catbox.moe/resources/internals/api.php",
+                data={"reqtype": "fileupload", "time": "72h"},
+                files={"fileToUpload": ("reel.mp4", f, "video/mp4")},
+                timeout=300
+            )
+        url = r.text.strip()
+        if url.startswith("https://"):
+            print(f"  URL: {url}")
+            return url
+        print(f"  litterbox: {r.status_code} — {r.text[:120]}")
+    except Exception as e:
+        print(f"  litterbox failed: {e}")
+
+    # 2. catbox.moe — permanente, upload anónimo (userhash vazio)
+    try:
+        print("  Uploading to catbox.moe...")
+        with open(file_path, "rb") as f:
+            r = requests.post(
+                "https://catbox.moe/user/api.php",
+                data={"reqtype": "fileupload", "userhash": ""},
+                files={"fileToUpload": ("reel.mp4", f, "video/mp4")},
+                timeout=300
+            )
+        url = r.text.strip()
+        if url.startswith("https://"):
+            print(f"  URL: {url}")
+            return url
+        print(f"  catbox.moe: {r.text[:120]}")
+    except Exception as e:
+        print(f"  catbox.moe failed: {e}")
+
+    # 3. transfer.sh — 14 dias, sem conta
+    try:
+        print("  Uploading to transfer.sh...")
+        with open(file_path, "rb") as f:
+            r = requests.put(
+                "https://transfer.sh/reel.mp4",
+                data=f,
+                timeout=300
+            )
+        url = r.text.strip()
+        if url.startswith("https://"):
+            print(f"  URL: {url}")
+            return url
+        print(f"  transfer.sh: {r.status_code} — {r.text[:120]}")
+    except Exception as e:
+        print(f"  transfer.sh failed: {e}")
+
+    # 4. 0x0.st — último recurso
     try:
         print("  Uploading to 0x0.st...")
         with open(file_path, "rb") as f:
             r = requests.post(
                 "https://0x0.st",
                 files={"file": ("reel.mp4", f, "video/mp4")},
-                timeout=180
+                timeout=300
             )
         if r.status_code == 200 and r.text.strip().startswith("https://"):
             url = r.text.strip()
             print(f"  URL: {url}")
             return url
-        print(f"  0x0.st: {r.status_code} — {r.text[:100]}")
+        print(f"  0x0.st: {r.status_code} — {r.text[:120]}")
     except Exception as e:
         print(f"  0x0.st failed: {e}")
-
-    # 2. Catbox.moe — fallback
-    try:
-        print("  Uploading to catbox.moe...")
-        with open(file_path, "rb") as f:
-            r = requests.post(
-                "https://catbox.moe/user/api.php",
-                data={"reqtype": "fileupload"},
-                files={"fileToUpload": ("reel.mp4", f, "video/mp4")},
-                timeout=180
-            )
-        url = r.text.strip()
-        if url.startswith("https://"):
-            print(f"  URL: {url}")
-            return url
-        print(f"  catbox.moe: {r.text[:100]}")
-    except Exception as e:
-        print(f"  catbox.moe failed: {e}")
 
     raise RuntimeError("Todos os serviços de upload falharam")
 
