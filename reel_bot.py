@@ -228,7 +228,7 @@ def make_overlay(script: dict) -> Image.Image:
     PAD = 55  # horizontal padding for cards
 
     # ── Top tag ───────────────────────────────────────────────────────────────
-    tag = "✨ GOOD NEWS ✨"
+    tag = "* GOOD NEWS *"
     bbox = draw.textbbox((0, 0), tag, font=f_tag)
     tw = bbox[2] - bbox[0]
     draw.text(((REEL_W - tw) // 2, 90), tag, font=f_tag, fill="#FFD700")
@@ -291,14 +291,14 @@ def make_overlay(script: dict) -> Image.Image:
         ny += line_h_n
 
     # ── Branding ──────────────────────────────────────────────────────────────
-    brand = "🌍 Good News Today"
+    brand = "Good News Today"
     bbox  = draw.textbbox((0, 0), brand, font=f_brand)
     tw    = bbox[2] - bbox[0]
     bx    = (REEL_W - tw) // 2
     draw.text((bx + 2, REEL_H - 198), brand, font=f_brand, fill=(0, 0, 0, 160))
     draw.text((bx,     REEL_H - 200), brand, font=f_brand, fill="#FFD700")
 
-    cta  = "Follow for daily good news! 💛"
+    cta  = "Follow for daily good news!"
     bbox = draw.textbbox((0, 0), cta, font=f_cta)
     tw   = bbox[2] - bbox[0]
     draw.text(((REEL_W - tw) // 2, REEL_H - 135), cta, font=f_cta,
