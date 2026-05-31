@@ -143,19 +143,17 @@ def has_audio_stream(path: str) -> bool:
         return False
 
 def get_background_music(tmp_dir: Path) -> str | None:
-    """Return path to background music if available and valid audio."""
-    # 1. Local file (committed to repo as music/background.mp3)
-    local = Path("music/background.mp3")
-    if local.exists():
-        if has_audio_stream(str(local)):
-            print("  Using local music/background.mp3")
-            return str(local)
-        print("  music/background.mp3 is not valid audio — skipping")
-
-    # 2. No Pixabay music API — their API only supports images/videos.
-    #    To add music: download a royalty-free MP3 from https://pixabay.com/music/
-    #    and commit it to the repo as music/background.mp3
-    print("  No music available — add music/background.mp3 to repo to enable")
+    """Return path to background music if available and valid audio.
+    Looks for any MP3 file inside the music/ folder."""
+    music_dir = Path("music")
+    if music_dir.exists():
+        mp3_files = sorted(music_dir.glob("*.mp3"))
+        for mp3 in mp3_files:
+            if has_audio_stream(str(mp3)):
+                print(f"  Using music: {mp3.name}")
+                return str(mp3)
+            print(f"  {mp3.name} is not valid audio — skipping")
+    print("  No music available — add an MP3 to music/ folder to enable")
     return None
 
 # ── 5. Pexels Video ───────────────────────────────────────────────────────────
