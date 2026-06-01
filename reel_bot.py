@@ -30,6 +30,9 @@ NEWS_FEEDS = [
     "https://www.goodnewsnetwork.org/feed/",
     "https://www.positive.news/feed/",
     "https://www.sunnyskyz.com/feed",
+    # Instagram accounts via RSSHub (public posts)
+    "https://rsshub.app/instagram/user/thegoodnewsmovement",
+    "https://rsshub.app/instagram/user/goodnews_movement",
 ]
 
 FONT_BOLD    = "/usr/share/fonts/truetype/roboto/Roboto-Bold.ttf"
