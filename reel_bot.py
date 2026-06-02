@@ -67,25 +67,36 @@ def fetch_news(max_items: int = 15) -> list[dict]:
 
 # ── 2. Claude Script ──────────────────────────────────────────────────────────
 
-def prepare_script(news_items: list[dict]) -> dict:
+def prepare_script(news_items: list[dict], available_videos: dict[str, str] = {}) -> dict:
     client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
     news_text = "\n".join(f"- {n['title']}" for n in news_items)
 
-    prompt = f"""You create viral Instagram Reels for @positivepulse.world — bold tech, AI, money and innovation breakthroughs that change the world.
+    if available_videos:
+        video_options = "\n".join(f"- {theme}" for theme in available_videos.keys())
+        video_section = f"""
+AVAILABLE VIDEO THEMES (pre-fetched from Pexels — these are confirmed available):
+{video_options}
 
-Style: Like @wealth but for GOOD NEWS. Bold, impactful, makes people stop scrolling and save the post.
-Focus on: AI breakthroughs, tech innovations, money moves, space discoveries, medical advances, renewable energy, future technology.
+Choose the story that BEST MATCHES one of these themes visually.
+Return the EXACT theme name in "video_theme"."""
+    else:
+        video_section = 'Return a cinematic 3-word Pexels query in "video_theme".'
+
+    prompt = f"""You create viral Instagram Reels for @positivepulse.world — tech, AI, money and innovation breakthroughs.
+
+Style: @wealth but GOOD NEWS. Bold, stops the scroll, makes people save the post.
+{video_section}
 
 Stories:
 {news_text}
 
 Reply ONLY in valid JSON — no markdown:
 {{
-  "title": "MAX 4 WORDS ALL CAPS — short and punchy. Examples: 'AI CHANGED EVERYTHING', 'NOBODY SAW THIS', 'THIS CHANGES EVERYTHING', 'FUTURE IS HERE'. NEVER more than 4 words.",
-  "narration": "3 punchy sentences. MAX 45 words. Start with the most shocking fact. Use power words. End with the real-world impact on people's lives. Confident and exciting tone.",
-  "hook": "3-4 WORDS ALL CAPS — stops the scroll instantly. Examples: 'WAIT FOR THIS', 'GAME CHANGER', 'THIS IS HUGE', 'NOBODY TALKS ABOUT THIS'",
-  "video_query": "3 words for Pexels that are VISUALLY STUNNING AND related to the story. Think cinematic: instead of 'water filtration' use 'clean ocean water'. Instead of 'microplastics research' use 'ocean pollution blue'. Instead of 'AI chip' use 'futuristic technology glow'. Always pick something that LOOKS beautiful AND connects to the story theme.",
-  "caption": "Line 1: Bold statement with 1 emoji that makes people save the post. Line 2: Question that invites comments.",
+  "title": "MAX 4 WORDS ALL CAPS. Examples: 'AI CHANGED EVERYTHING', 'NOBODY SAW THIS', 'FUTURE IS HERE'",
+  "narration": "3 punchy sentences. MAX 45 words. Shocking fact first. Power words. Real-world impact at end.",
+  "hook": "3-4 WORDS ALL CAPS. Examples: 'WAIT FOR THIS', 'GAME CHANGER', 'THIS IS HUGE'",
+  "video_theme": "exact theme name from list above",
+  "caption": "Line 1: Bold statement + 1 emoji people want to save. Line 2: Question inviting comments.",
   "hashtags": "#technology #innovation #AI #future #tech #investing #breakthrough #science #positivepulse #goodvibes"
 }}"""
 
@@ -98,7 +109,7 @@ Reply ONLY in valid JSON — no markdown:
         raw = re.sub(r"```(?:json)?", "", raw).strip().rstrip("`").strip()
     result = json.loads(raw)
     print(f"  Title: {result['title']}")
-    print(f"  Query: {result['video_query']}")
+    print(f"  Video theme: {result.get('video_theme', 'N/A')}")
     return result
 
 # ── 3. Voice ──────────────────────────────────────────────────────────────────
@@ -201,41 +212,72 @@ def generate_subtitles(narration: str, voice_duration: float, output_path: str,
 
 # ── 5. Pexels Video ───────────────────────────────────────────────────────────
 
-def get_pexels_video(query: str) -> str | None:
+# ── Cinematic video themes — always look stunning ─────────────────────────────
+VIDEO_THEMES = [
+    ("neon city night",        "futuristic urban energy"),
+    ("space galaxy stars",     "cosmos and universe"),
+    ("ocean waves blue",       "nature and environment"),
+    ("solar energy field",     "renewable energy and green tech"),
+    ("drone aerial city",      "bird's eye city view"),
+    ("electric car speed",     "future of transport"),
+    ("server room blue",       "data and technology"),
+    ("rocket launch fire",     "space exploration"),
+    ("skyscraper aerial view", "modern architecture"),
+    ("futuristic robot arm",   "AI and automation"),
+    ("stock market charts",    "finance and investing"),
+    ("wind turbines sunset",   "clean energy"),
+]
+
+def _search_pexels_video(query: str, headers: dict) -> str | None:
+    """Search Pexels for one query, return video URL or None."""
+    for orientation in ("portrait", "landscape"):
+        params = {"query": query, "per_page": 12, "orientation": orientation, "size": "large"}
+        try:
+            r = requests.get("https://api.pexels.com/videos/search",
+                             headers=headers, params=params, timeout=15)
+            if r.status_code != 200:
+                continue
+            videos = [v for v in r.json().get("videos", []) if v.get("duration", 0) >= 12]
+            if not videos:
+                continue
+            random.shuffle(videos[:5])
+            for video in videos:
+                files = sorted(video.get("video_files", []),
+                               key=lambda f: f.get("height", 0), reverse=True)
+                for f in files:
+                    if 720 <= f.get("height", 0) <= 1920:
+                        return f["link"]
+        except Exception:
+            pass
+    return None
+
+def prefetch_videos() -> dict[str, str]:
+    """Pre-fetch video URLs for a random selection of cinematic themes.
+    Returns {theme_name: video_url}."""
     if not PEXELS_API_KEY:
-        print("  No PEXELS_API_KEY")
+        return {}
+    headers  = {"Authorization": PEXELS_API_KEY}
+    themes   = random.sample(VIDEO_THEMES, min(8, len(VIDEO_THEMES)))
+    available = {}
+    for query, description in themes:
+        url = _search_pexels_video(query, headers)
+        if url:
+            available[query] = url
+            print(f"  ✓ '{query}'")
+        if len(available) >= 6:   # 6 options is enough
+            break
+    print(f"  {len(available)} video themes pre-fetched")
+    return available
+
+def get_pexels_video(query: str) -> str | None:
+    """Fallback: search Pexels directly for a query."""
+    if not PEXELS_API_KEY:
         return None
     headers = {"Authorization": PEXELS_API_KEY}
-
-    # Try original query, then broader versions of the same theme
-    words = query.split()
-    queries_to_try = [
-        query,
-        " ".join(words[:2]) if len(words) >= 2 else query,  # first 2 words
-        words[0] if words else query,                         # first word only
-    ]
-
-    for q in queries_to_try:
-        for orientation in ("portrait", "landscape"):
-            params = {"query": q, "per_page": 15, "orientation": orientation, "size": "large"}
-            try:
-                r = requests.get("https://api.pexels.com/videos/search",
-                                 headers=headers, params=params, timeout=15)
-                if r.status_code != 200:
-                    continue
-                videos = [v for v in r.json().get("videos", []) if v.get("duration", 0) >= 12]
-                if not videos:
-                    continue
-                random.shuffle(videos[:6])
-                for video in videos:
-                    files = sorted(video.get("video_files", []),
-                                   key=lambda f: f.get("height", 0), reverse=True)
-                    for f in files:
-                        if 720 <= f.get("height", 0) <= 1920:
-                            print(f"  Video found with query: '{q}'")
-                            return f["link"]
-            except Exception as e:
-                print(f"  Pexels error ({q}): {e}")
+    for q in [query, query.split()[0]]:
+        url = _search_pexels_video(q, headers)
+        if url:
+            return url
     return None
 
 def download_file(url: str, path: str):
@@ -522,54 +564,60 @@ def main():
     if not news:
         print("ERROR: No news found"); return
 
-    # 2. Script
-    print("2. Claude scripting...")
-    script = prepare_script(news)
+    # 2. Pre-fetch videos (Option B — video first, story second)
+    print("2. Pre-fetching cinematic videos...")
+    available_videos = prefetch_videos()
+
+    # 3. Claude picks best story+video combo
+    print("3. Claude scripting (matching story to video)...")
+    script = prepare_script(news, available_videos)
 
     with tempfile.TemporaryDirectory() as tmp:
         tmp = Path(tmp)
 
-        # 3. Voice
-        print(f"3. Generating voice ({voice_engine})...")
+        # 4. Voice
+        print(f"4. Generating voice ({voice_engine})...")
         voice_path = str(tmp / "voice.mp3")
         generate_voice(script["narration"], voice_path)
         voice_dur = get_audio_duration(voice_path)
 
-        # 4. Subtitles (with hook text)
-        print("4. Generating subtitles...")
+        # 5. Subtitles
+        print("5. Generating subtitles...")
         sub_path = str(tmp / "subs.ass")
         hook_text = script.get("hook", "")
         generate_subtitles(script["narration"], voice_dur, sub_path, hook_text)
         if hook_text:
             print(f"  Hook: '{hook_text}'")
 
-        # 5. Video
-        print(f"5. Fetching Pexels video: '{script['video_query']}'...")
-        video_url_pex = get_pexels_video(script["video_query"])
-        if not video_url_pex:
-            print("  Trying fallback: 'emotional family moment'")
-            video_url_pex = get_pexels_video("emotional family moment")
+        # 6. Get pre-fetched video
+        chosen_theme = script.get("video_theme", "")
+        video_url_pex = available_videos.get(chosen_theme)
+        if video_url_pex:
+            print(f"6. Using pre-fetched video: '{chosen_theme}'")
+        else:
+            print(f"6. Theme '{chosen_theme}' not in cache — searching Pexels...")
+            video_url_pex = get_pexels_video(chosen_theme or "futuristic technology")
         if not video_url_pex:
             print("ERROR: No Pexels video found"); return
 
         video_path = str(tmp / "bg.mp4")
         download_file(video_url_pex, video_path)
 
-        # 6. Music
-        print("6. Getting background music...")
+        # 7. Music
+        print("7. Getting background music...")
         music_path = get_background_music()
 
-        # 7. Overlay (minimal — just title + branding)
-        print("7. Creating overlay...")
+        # 8. Overlay
+        print("8. Creating overlay...")
         overlay = make_overlay(script)
 
-        # 8. Assemble
-        print("8. Assembling reel...")
+        # 9. Assemble
+        print("9. Assembling reel...")
         reel_path = str(tmp / "reel.mp4")
         assemble_reel(video_path, voice_path, overlay, reel_path, sub_path, music_path)
 
-        # 9. Upload + post
-        print("9. Uploading & posting...")
+        # 10. Upload + post
+        print("10. Uploading & posting...")
         public_url = upload_video(reel_path)
         send_to_make(public_url, script)
 
