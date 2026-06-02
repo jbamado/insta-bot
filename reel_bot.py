@@ -201,28 +201,50 @@ def generate_subtitles(narration: str, voice_duration: float, output_path: str,
 
 # ── 5. Pexels Video ───────────────────────────────────────────────────────────
 
+# Fallback queries — guaranteed to return stunning cinematic footage
+CINEMATIC_FALLBACKS = [
+    "neon city night",
+    "drone city aerial",
+    "server room blue",
+    "futuristic technology",
+    "space stars galaxy",
+    "rocket launch fire",
+    "electric car speed",
+    "solar panels sunset",
+    "skyscraper aerial view",
+    "data center lights",
+]
+
 def get_pexels_video(query: str) -> str | None:
     if not PEXELS_API_KEY:
         print("  No PEXELS_API_KEY")
         return None
     headers = {"Authorization": PEXELS_API_KEY}
-    for orientation in ("portrait", "landscape"):
-        params = {"query": query, "per_page": 20, "orientation": orientation, "size": "large"}
-        try:
-            r = requests.get("https://api.pexels.com/videos/search",
-                             headers=headers, params=params, timeout=15)
-            if r.status_code != 200:
-                continue
-            videos = [v for v in r.json().get("videos", []) if v.get("duration", 0) >= 12]
-            random.shuffle(videos[:8])
-            for video in videos:
-                files = sorted(video.get("video_files", []),
-                               key=lambda f: f.get("height", 0), reverse=True)
-                for f in files:
-                    if 720 <= f.get("height", 0) <= 1920:
-                        return f["link"]
-        except Exception as e:
-            print(f"  Pexels error: {e}")
+
+    # Try Claude's query first, then cinematic fallbacks
+    queries_to_try = [query] + random.sample(CINEMATIC_FALLBACKS, 4)
+
+    for q in queries_to_try:
+        for orientation in ("portrait", "landscape"):
+            params = {"query": q, "per_page": 15, "orientation": orientation, "size": "large"}
+            try:
+                r = requests.get("https://api.pexels.com/videos/search",
+                                 headers=headers, params=params, timeout=15)
+                if r.status_code != 200:
+                    continue
+                videos = [v for v in r.json().get("videos", []) if v.get("duration", 0) >= 12]
+                if not videos:
+                    continue
+                random.shuffle(videos[:6])
+                for video in videos:
+                    files = sorted(video.get("video_files", []),
+                                   key=lambda f: f.get("height", 0), reverse=True)
+                    for f in files:
+                        if 720 <= f.get("height", 0) <= 1920:
+                            print(f"  Video found with query: '{q}'")
+                            return f["link"]
+            except Exception as e:
+                print(f"  Pexels error ({q}): {e}")
     return None
 
 def download_file(url: str, path: str):
