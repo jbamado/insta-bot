@@ -19,8 +19,11 @@ jobs:
           sudo apt-get install -y ffmpeg fonts-roboto wget
           mkdir -p /usr/share/fonts/truetype/bebas
           wget -q "https://github.com/google/fonts/raw/main/ofl/bebasneueneu/BebasNeue-Regular.ttf" \
-               -O /usr/share/fonts/truetype/bebas/BebasNeue-Regular.ttf
-          fc-cache -fv
+               -O /usr/share/fonts/truetype/bebas/BebasNeue-Regular.ttf || \
+          wget -q "https://fonts.gstatic.com/s/bebasneueneu/v14/JTUSjIg69CK48gW7PXooxW5rygbi49c.ttf" \
+               -O /usr/share/fonts/truetype/bebas/BebasNeue-Regular.ttf || \
+          echo "Bebas Neue download failed — will use Roboto Bold fallback"
+          fc-cache -fv || true
 
       - name: Setup Python
         uses: actions/setup-python@v5
