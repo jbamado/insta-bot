@@ -16,7 +16,11 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update -q
-          sudo apt-get install -y ffmpeg fonts-roboto
+          sudo apt-get install -y ffmpeg fonts-roboto wget
+          mkdir -p /usr/share/fonts/truetype/bebas
+          wget -q "https://github.com/google/fonts/raw/main/ofl/bebasneueneu/BebasNeue-Regular.ttf" \
+               -O /usr/share/fonts/truetype/bebas/BebasNeue-Regular.ttf
+          fc-cache -fv
 
       - name: Setup Python
         uses: actions/setup-python@v5

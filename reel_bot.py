@@ -26,6 +26,15 @@ ELEVENLABS_VOICE_ID = "EXAVITQu4vr4xnSDxMaL"  # Sarah — warm, natural
 
 REEL_W, REEL_H = 1080, 1920
 
+# ── Brand colors (match carousel/post_bot style) ──────────────────────────────
+GOLD  = (255, 200,   0)
+WHITE = (255, 255, 255)
+BLACK = (  0,   0,   0)
+
+FONT_BEBAS   = "/usr/share/fonts/truetype/bebas/BebasNeue-Regular.ttf"
+FONT_BOLD    = "/usr/share/fonts/truetype/roboto/Roboto-Bold.ttf"
+FONT_REGULAR = "/usr/share/fonts/truetype/roboto/Roboto-Regular.ttf"
+
 NEWS_FEEDS = [
     "https://www.goodnewsnetwork.org/feed/",
     "https://www.positive.news/feed/",
@@ -62,26 +71,22 @@ def prepare_script(news_items: list[dict]) -> dict:
     client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
     news_text = "\n".join(f"- {n['title']}" for n in news_items)
 
-    prompt = f"""You create viral Instagram Reels for a good news page. Study what @goodnews_movement (4M followers) does:
-- Stories about REAL PEOPLE doing unexpected acts of kindness
-- Titles that are EMOTIONAL not descriptive ("HE GAVE EVERYTHING" not "MAN DONATES MONEY")
-- Content people DM to friends because it made them smile or tear up
+    prompt = f"""You create viral Instagram Reels for @positivepulse.world — bold tech, AI, money and innovation breakthroughs that change the world.
 
-ONLY pick stories about: acts of kindness, children doing amazing things, animals rescued,
-communities helping, underdogs winning, strangers helping strangers.
-AVOID: inventions, science facts, corporate news, statistics without a human face.
+Style: Like @wealth but for GOOD NEWS. Bold, impactful, makes people stop scrolling and save the post.
+Focus on: AI breakthroughs, tech innovations, money moves, space discoveries, medical advances, renewable energy, future technology.
 
 Stories:
 {news_text}
 
-Reply ONLY in valid JSON — no markdown, no explanation:
+Reply ONLY in valid JSON — no markdown:
 {{
-  "title": "3-4 WORDS MAX IN CAPS — emotional, stops the scroll. Focus on the FEELING not the fact. Examples: 'HE GAVE EVERYTHING', 'NOBODY EXPECTED THIS', 'SHE CHANGED 100 LIVES'",
-  "narration": "3 sentences MAX. Under 40 words. Start mid-action, no slow build. Short punchy sentences. End with hope. Sound like texting a friend about something unbelievable.",
-  "video_query": "3-4 word Pexels search matching the EMOTION (e.g. 'elderly couple embrace', 'child laughing outside', 'volunteers helping people', 'woman happy tears', 'community celebration'). Match the feeling of the story.",
-  "hook": "2-4 WORDS MAX — shown on screen before narration starts. Creates irresistible curiosity. Examples: 'WAIT FOR IT', 'THIS IS REAL', 'TEARS INCOMING', 'YOU NEED THIS', 'UNBELIEVABLE'",
-  "caption": "Line 1: Share-worthy hook with 1 emoji. Line 2: Question that invites comments.",
-  "hashtags": "#goodnews #kindness #humanity #hope #inspiration #spreadlove #feelgood #makeyourday #bethechange #positivevibes"
+  "title": "4-6 WORDS ALL CAPS — creates FOMO or amazement. Examples: 'THIS AI JUST CHANGED EVERYTHING', 'THE MONEY MOVE NOBODY SAW', 'BIGGEST TECH BREAKTHROUGH NOW', 'THIS CHANGES YOUR FUTURE'",
+  "narration": "3 punchy sentences. MAX 45 words. Start with the most shocking fact. Use power words. End with the real-world impact on people's lives. Confident and exciting tone.",
+  "hook": "3-4 WORDS ALL CAPS — stops the scroll instantly. Examples: 'WAIT FOR THIS', 'GAME CHANGER', 'THIS IS HUGE', 'NOBODY TALKS ABOUT THIS'",
+  "video_query": "3-4 word Pexels search for CINEMATIC TECH footage (e.g. 'futuristic city lights', 'AI robot technology', 'stock market data', 'space rocket launch', 'solar energy field', 'electric car future')",
+  "caption": "Line 1: Bold statement with 1 emoji that makes people save the post. Line 2: Question that invites comments.",
+  "hashtags": "#technology #innovation #AI #future #tech #investing #breakthrough #science #positivepulse #goodvibes"
 }}"""
 
     msg = client.messages.create(
@@ -162,18 +167,18 @@ def generate_subtitles(narration: str, voice_duration: float, output_path: str,
         "OutlineColour,BackColour,Bold,Italic,Underline,StrikeOut,"
         "ScaleX,ScaleY,Spacing,Angle,BorderStyle,Outline,Shadow,"
         "Alignment,MarginL,MarginR,MarginV,Encoding\n"
-        # White — bottom-center subtitles
-        "Style: White,Roboto Bold,88,&H00FFFFFF,&H000000FF,"
-        "&H00000000,&H00000000,-1,0,0,0,100,100,0,0,1,7,2,"
-        "2,60,60,400,1\n"
-        # Yellow — emphasis every 3rd chunk (ASS color: AABBGGRR — yellow=&H0000FFFF)
-        "Style: Yellow,Roboto Bold,92,&H0000FFFF,&H000000FF,"
-        "&H00000000,&H00000000,-1,0,0,0,100,100,0,0,1,7,2,"
-        "2,60,60,400,1\n"
-        # Hook — appears below title card, top-aligned, for first 2s
-        "Style: Hook,Roboto Bold,76,&H00FFFFFF,&H000000FF,"
-        "&H00000000,&H00000000,-1,0,0,0,100,100,2,0,1,6,2,"
-        "8,80,80,490,1\n\n"
+        # Gold — main subtitle color (ASS AABBGGRR: gold=&H0000C8FF)
+        "Style: White,Bebas Neue,92,&H0000C8FF,&H000000FF,"
+        "&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,7,2,"
+        "2,60,60,420,1\n"
+        # White — alternating subtitle color
+        "Style: Yellow,Bebas Neue,88,&H00FFFFFF,&H000000FF,"
+        "&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,7,2,"
+        "2,60,60,420,1\n"
+        # Hook — top-aligned, gold, large
+        "Style: Hook,Bebas Neue,80,&H0000C8FF,&H000000FF,"
+        "&H00000000,&H00000000,0,0,0,0,100,100,2,0,1,6,2,"
+        "8,80,80,500,1\n\n"
         "[Events]\n"
         "Format: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text\n"
     )
@@ -251,76 +256,90 @@ def get_background_music() -> str | None:
     print("  No music — add MP3 to music/ folder to enable")
     return None
 
-# ── 7. Text Overlay (PIL) — Minimal: hook + branding only ─────────────────────
+# ── 7. Text Overlay (PIL) — @wealth style: dark + gold ───────────────────────
+
+def _shadow_text(draw, x, y, text, font, fill=None, shadow=5):
+    """Texto com sombra preta — igual ao post_bot."""
+    if fill is None:
+        fill = GOLD
+    for dx in range(-shadow, shadow + 1, 2):
+        for dy in range(-shadow, shadow + 1, 2):
+            if dx != 0 or dy != 0:
+                draw.text((x + dx, y + dy), text, font=font, fill=BLACK)
+    draw.text((x, y), text, font=font, fill=fill)
+
+def _centered_text(draw, y, text, font, fill=None, shadow=5):
+    if fill is None:
+        fill = GOLD
+    bb = draw.textbbox((0, 0), text, font=font)
+    tw = bb[2] - bb[0]
+    _shadow_text(draw, (REEL_W - tw) // 2, y, text, font, fill, shadow)
+    return bb[3] - bb[1]
+
+def _draw_brand_bar(draw, y):
+    """● POSITIVE PULSE ● com linhas douradas — igual ao post_bot."""
+    try:
+        bf = ImageFont.truetype(FONT_REGULAR, 32)
+    except Exception:
+        bf = ImageFont.load_default()
+    txt  = "POSITIVE PULSE"
+    dot  = "●"
+    full = f"{dot}  {txt}  {dot}"
+    bb   = draw.textbbox((0, 0), full, font=bf)
+    fw   = bb[2] - bb[0]
+    cx   = REEL_W // 2
+    margin = 60
+
+    line_end = cx - fw // 2 - 18
+    if line_end > margin:
+        draw.rectangle([(margin, y + 14), (line_end, y + 17)], fill=GOLD)
+    draw.text((cx - fw // 2, y), full, font=bf, fill=GOLD)
+    line2_start = cx + fw // 2 + 18
+    if line2_start < REEL_W - margin:
+        draw.rectangle([(line2_start, y + 14), (REEL_W - margin, y + 17)], fill=GOLD)
 
 def make_overlay(script: dict) -> Image.Image:
-    """Minimal overlay: punchy title at top + branding at bottom.
-    The narration is handled by dynamic ASS subtitles, not static text."""
+    """@wealth style overlay: dark gradient, gold Impact title, POSITIVE PULSE brand."""
     img  = Image.new("RGBA", (REEL_W, REEL_H), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
 
-    # Gradient: dark at top (title area) and bottom (branding), clear in middle
+    # Heavy dark gradient top + bottom, clear in the middle (video breathes)
     for y in range(REEL_H):
         frac = y / REEL_H
-        if frac < 0.38:
-            alpha = int(210 * (1 - frac / 0.38) ** 0.7)
-        elif frac < 0.62:
-            alpha = 0   # completely clear — let the video breathe
+        if frac < 0.45:
+            alpha = int(230 * (1 - frac / 0.45) ** 0.6)
+        elif frac < 0.60:
+            alpha = int(30 + 40 * ((frac - 0.45) / 0.15))
         else:
-            alpha = int(220 * ((frac - 0.62) / 0.38) ** 0.7)
-        draw.line([(0, y), (REEL_W, y)], fill=(0, 0, 0, min(alpha, 215)))
+            alpha = int(70 + 200 * ((frac - 0.60) / 0.40) ** 0.7)
+        draw.line([(0, y), (REEL_W, y)], fill=(0, 0, 0, min(int(alpha), 235)))
+
+    # Load Bebas Neue (or fallback to Roboto Bold)
+    try:
+        f_title = ImageFont.truetype(FONT_BEBAS, 120)
+        f_sub   = ImageFont.truetype(FONT_BEBAS,  52)
+    except Exception:
+        try:
+            f_title = ImageFont.truetype(FONT_BOLD, 108)
+            f_sub   = ImageFont.truetype(FONT_BOLD,  48)
+        except Exception:
+            f_title = f_sub = ImageFont.load_default()
 
     try:
-        f_tag   = ImageFont.truetype(FONT_BOLD,    44)
-        f_title = ImageFont.truetype(FONT_BOLD,    98)
-        f_brand = ImageFont.truetype(FONT_BOLD,    50)
-        f_cta   = ImageFont.truetype(FONT_REGULAR, 38)
+        f_regular = ImageFont.truetype(FONT_REGULAR, 36)
     except Exception:
-        print("  Warning: fonts not found — using default")
-        f_tag = f_title = f_brand = f_cta = ImageFont.load_default()
+        f_regular = ImageFont.load_default()
 
-    PAD = 55
-
-    # ── Top tag ───────────────────────────────────────────────────────────────
-    tag = "* GOOD NEWS *"
-    bbox = draw.textbbox((0, 0), tag, font=f_tag)
-    tw = bbox[2] - bbox[0]
-    draw.text(((REEL_W - tw) // 2, 80), tag, font=f_tag, fill="#FFD700")
-
-    # ── Title card (orange) ──────────────────────────────────────────────────
-    title_lines = textwrap.wrap(script["title"], width=13)
-    line_h_t    = 112
-    title_blk_h = len(title_lines) * line_h_t + 44
-    card_t = 155
-    card_b = card_t + title_blk_h
-
-    draw.rounded_rectangle([PAD, card_t, REEL_W - PAD, card_b],
-                           radius=30, fill=(215, 90, 15, 220))
-    draw.rounded_rectangle([PAD, card_t, REEL_W - PAD, card_b],
-                           radius=30, outline=(255, 210, 0, 210), width=4)
-
-    ty = card_t + 22
+    # ── Title — top, gold, bold, ALL CAPS ─────────────────────────────────────
+    title = script["title"].upper()
+    title_lines = textwrap.wrap(title, width=14)
+    ty = 90
     for line in title_lines:
-        bbox = draw.textbbox((0, 0), line, font=f_title)
-        tw = bbox[2] - bbox[0]
-        tx = (REEL_W - tw) // 2
-        draw.text((tx + 3, ty + 3), line, font=f_title, fill=(0, 0, 0, 160))
-        draw.text((tx, ty),         line, font=f_title, fill="white")
-        ty += line_h_t
+        h = _centered_text(draw, ty, line, f_title, fill=GOLD, shadow=6)
+        ty += h + 12
 
-    # ── Branding ──────────────────────────────────────────────────────────────
-    brand = "Good News Today"
-    bbox  = draw.textbbox((0, 0), brand, font=f_brand)
-    tw    = bbox[2] - bbox[0]
-    bx    = (REEL_W - tw) // 2
-    draw.text((bx + 2, REEL_H - 205), brand, font=f_brand, fill=(0, 0, 0, 160))
-    draw.text((bx,     REEL_H - 207), brand, font=f_brand, fill="#FFD700")
-
-    cta  = "Follow for daily good news!"
-    bbox = draw.textbbox((0, 0), cta, font=f_cta)
-    tw   = bbox[2] - bbox[0]
-    draw.text(((REEL_W - tw) // 2, REEL_H - 140),
-              cta, font=f_cta, fill=(255, 255, 255, 210))
+    # ── Branding bar at bottom ─────────────────────────────────────────────────
+    _draw_brand_bar(draw, REEL_H - 110)
 
     return img
 
@@ -340,10 +359,10 @@ def assemble_reel(video_path: str, voice_path: str, overlay: Image.Image,
     ]
 
     # Build video filter chain
-    # Warm cinematic grade: +15% saturation, slight contrast boost, warm tint
+    # Dark cinematic grade matching @wealth style: desaturate slightly, darken
     grade = (
-        "eq=saturation=1.15:contrast=1.04:gamma=0.94,"
-        "colorbalance=rs=0.07:gs=0.02:bs=-0.05"
+        "eq=saturation=0.85:contrast=1.10:brightness=-0.05:gamma=0.88,"
+        "colorbalance=rs=-0.02:gs=-0.02:bs=-0.03"
     )
 
     has_subs = subtitle_path and Path(subtitle_path).exists()
