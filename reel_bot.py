@@ -178,33 +178,37 @@ def generate_subtitles(narration: str, voice_duration: float, output_path: str,
         "OutlineColour,BackColour,Bold,Italic,Underline,StrikeOut,"
         "ScaleX,ScaleY,Spacing,Angle,BorderStyle,Outline,Shadow,"
         "Alignment,MarginL,MarginR,MarginV,Encoding\n"
-        # Gold — main subtitle (BGR: 00C8FF = R=FF G=C8 B=00 = gold)
-        "Style: White,Roboto Bold,96,&H00FFC800,&H000000FF,"
+        # All styles use white base — color applied inline via \1c tag
+        "Style: Gold,Roboto Bold,96,&H00FFFFFF,&H000000FF,"
         "&H00000000,&H00000000,-1,0,0,0,100,100,0,0,1,8,0,"
         "2,60,60,430,1\n"
-        # White — alternating subtitle
-        "Style: Yellow,Roboto Bold,96,&H00FFFFFF,&H000000FF,"
+        "Style: White,Roboto Bold,96,&H00FFFFFF,&H000000FF,"
         "&H00000000,&H00000000,-1,0,0,0,100,100,0,0,1,8,0,"
         "2,60,60,430,1\n"
-        # Hook — top-aligned gold
-        "Style: Hook,Roboto Bold,84,&H00FFC800,&H000000FF,"
+        "Style: Hook,Roboto Bold,84,&H00FFFFFF,&H000000FF,"
         "&H00000000,&H00000000,-1,0,0,0,100,100,0,0,1,7,0,"
         "8,80,80,510,1\n\n"
         "[Events]\n"
         "Format: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text\n"
     )
 
-    # Hook text shown below title card (top-aligned) for first 2 seconds
+    # ASS inline colors (AABBGGRR): gold=&H0000C8FF, white=&H00FFFFFF
+    GOLD_TAG  = "\\1c&H0000C8FF"   # RGB(255,200,0) = gold
+    WHITE_TAG = "\\1c&H00FFFFFF"   # white
+
+    # Hook text — gold, top-aligned, 2 seconds
     if hook:
         clean = hook.upper().strip()
-        ass += f"Dialogue: 0,{fmt(0.0)},{fmt(2.0)},Hook,,0,0,0,,{{\\fad(250,350)}}{clean}\n"
+        ass += (f"Dialogue: 0,{fmt(0.0)},{fmt(2.0)},Hook,,0,0,0,,"
+                f"{{\\fad(250,350){GOLD_TAG}}}{clean}\n")
 
     # Narration chunks — ALL CAPS, fade-in, alternating gold/white
     for i, chunk in enumerate(chunks):
         s = t_start + i * chunk_dur
         e = s + chunk_dur + 0.06
-        style = "Yellow" if i % 3 == 1 else "White"
-        ass += f"Dialogue: 0,{fmt(s)},{fmt(e)},{style},,0,0,0,,{{\\fad(110,0)}}{chunk.upper()}\n"
+        color = GOLD_TAG if i % 2 == 0 else WHITE_TAG
+        ass += (f"Dialogue: 0,{fmt(s)},{fmt(e)},Gold,,0,0,0,,"
+                f"{{\\fad(110,0){color}}}{chunk.upper()}\n")
 
     with open(output_path, 'w', encoding='utf-8') as f:
         f.write(ass)
