@@ -84,7 +84,7 @@ Reply ONLY in valid JSON — no markdown:
   "title": "MAX 4 WORDS ALL CAPS — short and punchy. Examples: 'AI CHANGED EVERYTHING', 'NOBODY SAW THIS', 'THIS CHANGES EVERYTHING', 'FUTURE IS HERE'. NEVER more than 4 words.",
   "narration": "3 punchy sentences. MAX 45 words. Start with the most shocking fact. Use power words. End with the real-world impact on people's lives. Confident and exciting tone.",
   "hook": "3-4 WORDS ALL CAPS — stops the scroll instantly. Examples: 'WAIT FOR THIS', 'GAME CHANGER', 'THIS IS HUGE', 'NOBODY TALKS ABOUT THIS'",
-  "video_query": "3 word Pexels search — VISUALLY STUNNING tech footage only (e.g. 'neon city night', 'rocket launch smoke', 'server room blue', 'drone city aerial', 'solar farm sunset', 'electric car speed'). Must look AMAZING on screen.",
+  "video_query": "3 words for Pexels that are VISUALLY STUNNING AND related to the story. Think cinematic: instead of 'water filtration' use 'clean ocean water'. Instead of 'microplastics research' use 'ocean pollution blue'. Instead of 'AI chip' use 'futuristic technology glow'. Always pick something that LOOKS beautiful AND connects to the story theme.",
   "caption": "Line 1: Bold statement with 1 emoji that makes people save the post. Line 2: Question that invites comments.",
   "hashtags": "#technology #innovation #AI #future #tech #investing #breakthrough #science #positivepulse #goodvibes"
 }}"""
@@ -201,28 +201,19 @@ def generate_subtitles(narration: str, voice_duration: float, output_path: str,
 
 # ── 5. Pexels Video ───────────────────────────────────────────────────────────
 
-# Fallback queries — guaranteed to return stunning cinematic footage
-CINEMATIC_FALLBACKS = [
-    "neon city night",
-    "drone city aerial",
-    "server room blue",
-    "futuristic technology",
-    "space stars galaxy",
-    "rocket launch fire",
-    "electric car speed",
-    "solar panels sunset",
-    "skyscraper aerial view",
-    "data center lights",
-]
-
 def get_pexels_video(query: str) -> str | None:
     if not PEXELS_API_KEY:
         print("  No PEXELS_API_KEY")
         return None
     headers = {"Authorization": PEXELS_API_KEY}
 
-    # Try Claude's query first, then cinematic fallbacks
-    queries_to_try = [query] + random.sample(CINEMATIC_FALLBACKS, 4)
+    # Try original query, then broader versions of the same theme
+    words = query.split()
+    queries_to_try = [
+        query,
+        " ".join(words[:2]) if len(words) >= 2 else query,  # first 2 words
+        words[0] if words else query,                         # first word only
+    ]
 
     for q in queries_to_try:
         for orientation in ("portrait", "landscape"):
