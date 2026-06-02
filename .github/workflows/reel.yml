@@ -41,3 +41,11 @@ jobs:
           ELEVENLABS_API_KEY: ${{ secrets.ELEVENLABS_API_KEY }}
           PIXABAY_API_KEY:    ${{ secrets.PIXABAY_API_KEY }}
         run: python reel_bot.py
+
+      - name: Save used stories
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -f used_stories.json 2>/dev/null || true
+          git diff --staged --quiet || git commit -m "bot: update used stories [skip ci]"
+          git push || true

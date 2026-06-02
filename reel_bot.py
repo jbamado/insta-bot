@@ -35,6 +35,8 @@ FONT_BEBAS   = "/usr/share/fonts/truetype/bebas/BebasNeue-Regular.ttf"
 FONT_BOLD    = "/usr/share/fonts/truetype/roboto/Roboto-Bold.ttf"
 FONT_REGULAR = "/usr/share/fonts/truetype/roboto/Roboto-Regular.ttf"
 
+USED_STORIES_FILE = "used_stories.json"   # persisted in repo via Actions
+
 NEWS_FEEDS = [
     "https://www.goodnewsnetwork.org/feed/",
     "https://www.positive.news/feed/",
@@ -47,9 +49,26 @@ NEWS_FEEDS = [
 FONT_BOLD    = "/usr/share/fonts/truetype/roboto/Roboto-Bold.ttf"
 FONT_REGULAR = "/usr/share/fonts/truetype/roboto/Roboto-Regular.ttf"
 
-# ── 1. Fetch News ─────────────────────────────────────────────────────────────
+# ── 1. Used Stories Tracker ───────────────────────────────────────────────────
 
-def fetch_news(max_items: int = 15) -> list[dict]:
+def load_used_stories() -> set:
+    try:
+        with open(USED_STORIES_FILE) as f:
+            return set(json.load(f))
+    except Exception:
+        return set()
+
+def save_used_story(title: str):
+    used = load_used_stories()
+    used.add(title.lower().strip())
+    # Keep only last 50 to avoid the file growing forever
+    used_list = list(used)[-50:]
+    with open(USED_STORIES_FILE, "w") as f:
+        json.dump(used_list, f)
+
+# ── 2. Fetch News ─────────────────────────────────────────────────────────────
+
+def fetch_news(max_items: int = 20) -> list[dict]:
     items = []
     headers = {"User-Agent": "Mozilla/5.0 (compatible; ReelBot/1.0)"}
     for url in NEWS_FEEDS:
@@ -62,8 +81,15 @@ def fetch_news(max_items: int = 15) -> list[dict]:
                     items.append({"title": title, "summary": summary})
         except Exception as e:
             print(f"  Feed error {url}: {e}")
-    print(f"  {len(items)} stories fetched")
-    return items[:max_items]
+    # Filter out already-used stories
+    used = load_used_stories()
+    fresh = [i for i in items if i["title"].lower().strip() not in used]
+    print(f"  {len(items)} stories fetched, {len(fresh)} fresh (not yet used)")
+    if not fresh:
+        print("  All stories used — resetting history")
+        open(USED_STORIES_FILE, "w").write("[]")
+        fresh = items
+    return fresh[:max_items]
 
 # ── 2. Claude Script ──────────────────────────────────────────────────────────
 
@@ -626,6 +652,10 @@ def main():
         print("10. Uploading & posting...")
         public_url = upload_video(reel_path)
         send_to_make(public_url, script)
+
+        # 11. Mark story as used so it's never repeated
+        save_used_story(script["title"])
+        print(f"  Story marked as used: '{script['title']}'")
 
     print("\n=== Reel Bot done! ===\n")
 
