@@ -81,10 +81,10 @@ Stories:
 
 Reply ONLY in valid JSON — no markdown:
 {{
-  "title": "4-6 WORDS ALL CAPS — creates FOMO or amazement. Examples: 'THIS AI JUST CHANGED EVERYTHING', 'THE MONEY MOVE NOBODY SAW', 'BIGGEST TECH BREAKTHROUGH NOW', 'THIS CHANGES YOUR FUTURE'",
+  "title": "MAX 4 WORDS ALL CAPS — short and punchy. Examples: 'AI CHANGED EVERYTHING', 'NOBODY SAW THIS', 'THIS CHANGES EVERYTHING', 'FUTURE IS HERE'. NEVER more than 4 words.",
   "narration": "3 punchy sentences. MAX 45 words. Start with the most shocking fact. Use power words. End with the real-world impact on people's lives. Confident and exciting tone.",
   "hook": "3-4 WORDS ALL CAPS — stops the scroll instantly. Examples: 'WAIT FOR THIS', 'GAME CHANGER', 'THIS IS HUGE', 'NOBODY TALKS ABOUT THIS'",
-  "video_query": "3-4 word Pexels search for CINEMATIC TECH footage (e.g. 'futuristic city lights', 'AI robot technology', 'stock market data', 'space rocket launch', 'solar energy field', 'electric car future')",
+  "video_query": "3 word Pexels search — VISUALLY STUNNING tech footage only (e.g. 'neon city night', 'rocket launch smoke', 'server room blue', 'drone city aerial', 'solar farm sunset', 'electric car speed'). Must look AMAZING on screen.",
   "caption": "Line 1: Bold statement with 1 emoji that makes people save the post. Line 2: Question that invites comments.",
   "hashtags": "#technology #innovation #AI #future #tech #investing #breakthrough #science #positivepulse #goodvibes"
 }}"""
@@ -167,18 +167,18 @@ def generate_subtitles(narration: str, voice_duration: float, output_path: str,
         "OutlineColour,BackColour,Bold,Italic,Underline,StrikeOut,"
         "ScaleX,ScaleY,Spacing,Angle,BorderStyle,Outline,Shadow,"
         "Alignment,MarginL,MarginR,MarginV,Encoding\n"
-        # Gold — main subtitle color (ASS AABBGGRR: gold=&H0000C8FF)
-        "Style: White,Bebas Neue,92,&H0000C8FF,&H000000FF,"
-        "&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,7,2,"
-        "2,60,60,420,1\n"
-        # White — alternating subtitle color
-        "Style: Yellow,Bebas Neue,88,&H00FFFFFF,&H000000FF,"
-        "&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,7,2,"
-        "2,60,60,420,1\n"
-        # Hook — top-aligned, gold, large
-        "Style: Hook,Bebas Neue,80,&H0000C8FF,&H000000FF,"
-        "&H00000000,&H00000000,0,0,0,0,100,100,2,0,1,6,2,"
-        "8,80,80,500,1\n\n"
+        # Gold bold — main subtitle (ASS AABBGGRR: gold=&H0000C8FF)
+        "Style: White,Roboto Bold,96,&H0000C8FF,&H000000FF,"
+        "&H00000000,&H00000000,-1,0,0,0,100,100,0,0,1,8,2,"
+        "2,60,60,430,1\n"
+        # White bold — alternating subtitle
+        "Style: Yellow,Roboto Bold,96,&H00FFFFFF,&H000000FF,"
+        "&H00000000,&H00000000,-1,0,0,0,100,100,0,0,1,8,2,"
+        "2,60,60,430,1\n"
+        # Hook — top-aligned, gold large
+        "Style: Hook,Roboto Bold,84,&H0000C8FF,&H000000FF,"
+        "&H00000000,&H00000000,-1,0,0,0,100,100,0,0,1,7,2,"
+        "8,80,80,510,1\n\n"
         "[Events]\n"
         "Format: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text\n"
     )
@@ -188,12 +188,12 @@ def generate_subtitles(narration: str, voice_duration: float, output_path: str,
         clean = hook.upper().strip()
         ass += f"Dialogue: 0,{fmt(0.0)},{fmt(2.0)},Hook,,0,0,0,,{{\\fad(250,350)}}{clean}\n"
 
-    # Narration chunks — fade-in, alternating yellow/white
+    # Narration chunks — ALL CAPS, fade-in, alternating gold/white
     for i, chunk in enumerate(chunks):
         s = t_start + i * chunk_dur
         e = s + chunk_dur + 0.06
         style = "Yellow" if i % 3 == 1 else "White"
-        ass += f"Dialogue: 0,{fmt(s)},{fmt(e)},{style},,0,0,0,,{{\\fad(110,0)}}{chunk}\n"
+        ass += f"Dialogue: 0,{fmt(s)},{fmt(e)},{style},,0,0,0,,{{\\fad(110,0)}}{chunk.upper()}\n"
 
     with open(output_path, 'w', encoding='utf-8') as f:
         f.write(ass)
