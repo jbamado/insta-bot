@@ -178,17 +178,17 @@ def generate_subtitles(narration: str, voice_duration: float, output_path: str,
         "OutlineColour,BackColour,Bold,Italic,Underline,StrikeOut,"
         "ScaleX,ScaleY,Spacing,Angle,BorderStyle,Outline,Shadow,"
         "Alignment,MarginL,MarginR,MarginV,Encoding\n"
-        # Gold bold — main subtitle (ASS AABBGGRR: gold=&H0000C8FF)
-        "Style: White,Roboto Bold,96,&H0000C8FF,&H000000FF,"
-        "&H00000000,&H00000000,-1,0,0,0,100,100,0,0,1,8,2,"
+        # Gold — main subtitle (BGR: 00C8FF = R=FF G=C8 B=00 = gold)
+        "Style: White,Roboto Bold,96,&H00FFC800,&H000000FF,"
+        "&H00000000,&H00000000,-1,0,0,0,100,100,0,0,1,8,0,"
         "2,60,60,430,1\n"
-        # White bold — alternating subtitle
+        # White — alternating subtitle
         "Style: Yellow,Roboto Bold,96,&H00FFFFFF,&H000000FF,"
-        "&H00000000,&H00000000,-1,0,0,0,100,100,0,0,1,8,2,"
+        "&H00000000,&H00000000,-1,0,0,0,100,100,0,0,1,8,0,"
         "2,60,60,430,1\n"
-        # Hook — top-aligned, gold large
-        "Style: Hook,Roboto Bold,84,&H0000C8FF,&H000000FF,"
-        "&H00000000,&H00000000,-1,0,0,0,100,100,0,0,1,7,2,"
+        # Hook — top-aligned gold
+        "Style: Hook,Roboto Bold,84,&H00FFC800,&H000000FF,"
+        "&H00000000,&H00000000,-1,0,0,0,100,100,0,0,1,7,0,"
         "8,80,80,510,1\n\n"
         "[Events]\n"
         "Format: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text\n"
@@ -214,18 +214,21 @@ def generate_subtitles(narration: str, voice_duration: float, output_path: str,
 
 # ── Cinematic video themes — always look stunning ─────────────────────────────
 VIDEO_THEMES = [
-    ("neon city night",        "futuristic urban energy"),
-    ("space galaxy stars",     "cosmos and universe"),
-    ("ocean waves blue",       "nature and environment"),
-    ("solar energy field",     "renewable energy and green tech"),
-    ("drone aerial city",      "bird's eye city view"),
-    ("electric car speed",     "future of transport"),
-    ("server room blue",       "data and technology"),
-    ("rocket launch fire",     "space exploration"),
-    ("skyscraper aerial view", "modern architecture"),
-    ("futuristic robot arm",   "AI and automation"),
-    ("stock market charts",    "finance and investing"),
-    ("wind turbines sunset",   "clean energy"),
+    ("neon city night",        "futuristic urban tech energy"),
+    ("space galaxy stars",     "cosmos universe exploration"),
+    ("ocean waves sunset",     "nature environment sea"),
+    ("solar panels field",     "renewable clean energy"),
+    ("electric car highway",   "future of transport"),
+    ("server room lights",     "data AI technology"),
+    ("rocket launch sky",      "space exploration"),
+    ("wind turbines sunrise",  "clean green energy"),
+    ("green forest nature",    "environment ecology"),
+    ("stock market trading",   "finance money investing"),
+    ("futuristic city skyline","modern architecture future"),
+    ("scientist lab research", "science discovery innovation"),
+    ("mountains aerial view",  "nature landscape beauty"),
+    ("underwater ocean blue",  "marine environment sea life"),
+    ("robot artificial intelligence", "AI automation future"),
 ]
 
 def _search_pexels_video(query: str, headers: dict) -> str | None:
@@ -264,7 +267,7 @@ def prefetch_videos() -> dict[str, str]:
         if url:
             available[query] = url
             print(f"  ✓ '{query}'")
-        if len(available) >= 6:   # 6 options is enough
+        if len(available) >= 10:  # 10 options for better Claude matching
             break
     print(f"  {len(available)} video themes pre-fetched")
     return available
@@ -414,10 +417,9 @@ def assemble_reel(video_path: str, voice_path: str, overlay: Image.Image,
     ]
 
     # Build video filter chain
-    # Dark cinematic grade matching @wealth style: desaturate slightly, darken
+    # Cinematic grade: slight desaturate, moderate darken (not too dark)
     grade = (
-        "eq=saturation=0.85:contrast=1.10:brightness=-0.05:gamma=0.88,"
-        "colorbalance=rs=-0.02:gs=-0.02:bs=-0.03"
+        "eq=saturation=0.90:contrast=1.05:brightness=-0.02:gamma=0.93"
     )
 
     has_subs = subtitle_path and Path(subtitle_path).exists()
