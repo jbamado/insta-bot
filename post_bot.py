@@ -202,7 +202,7 @@ def generate_post() -> dict:
         "'THE MOST INSPIRING COUNTRIES RIGHT NOW', 'DISCOVERIES THAT WILL CHANGE YOUR LIFE').\n\n"
         "Rules:\n"
         "- Topic MUST be positive, uplifting, inspiring or fascinating\n"
-        "- List MUST have exactly 4 items\n"
+        "- List MUST have exactly 5 items\n"
         "- Each item needs its own Unsplash photo search term\n"
         "- Headlines and names must be SHORT and PUNCHY (max 5 words each)\n"
         "- Names should be ALL CAPS\n\n"
@@ -214,7 +214,8 @@ def generate_post() -> dict:
         '    {"name": "JANE GOODALL", "detail": "50 YEARS SAVING WILDLIFE", "search": "wildlife chimpanzee jungle africa"},\n'
         '    {"name": "ELON MUSK", "detail": "MAKING HUMANS MULTIPLANETARY", "search": "rocket space launch"},\n'
         '    {"name": "KATALIN KARIKO", "detail": "MRNA SAVES MILLIONS OF LIVES", "search": "medical laboratory vaccine"},\n'
-        '    {"name": "DEMIS HASSABIS", "detail": "AI SOLVES 50-YEAR OLD PROBLEM", "search": "artificial intelligence research"}\n'
+        '    {"name": "DEMIS HASSABIS", "detail": "AI SOLVES 50-YEAR OLD PROBLEM", "search": "artificial intelligence research"},\n'
+        '    {"name": "WANGARI MAATHAI", "detail": "PLANTED 50 MILLION TREES", "search": "trees forest reforestation africa"}\n'
         "  ],\n"
         '  "caption": "Instagram caption 2-3 sentences with call to action",\n'
         '  "hashtags": ["#positivenews", "#inspiring", ...] (25 hashtags)\n'
