@@ -19,6 +19,7 @@ ANTHROPIC_API_KEY   = os.getenv("ANTHROPIC_API_KEY", "")
 UNSPLASH_ACCESS_KEY = os.getenv("UNSPLASH_ACCESS_KEY", "XJWduaYYGKbMDEYFMfKa9EaGxcLN-_KkOlGPahK5x5A")
 IMGBB_API_KEY       = "44c06dbe6a657fdfd3ac4b3b97164db6"
 WEBHOOK_URL         = "https://hook.eu1.make.com/u3ci4y1uxw85edmxrd6li2qdjwu6mnst"
+REEL_WEBHOOK_URL    = os.getenv("MAKE_REEL_WEBHOOK", "")
 LOG_FILE            = "publications.json"
 
 GOLD  = (255, 200,   0)
@@ -373,6 +374,89 @@ def save_log(post: dict, urls: list):
     path.write_text(json.dumps(history, indent=2, ensure_ascii=False), encoding="utf-8")
     log.info(f"Log -> {len(history)} publicacoes")
 
+# ─── 8. Gerar imagem Reel (9:16) com a foto do hero ──────────────────────────
+
+def create_reel_image(post: dict, bg: Image.Image) -> str:
+    """Gera imagem 1080x1920 para Reel reutilizando a foto do slide 1."""
+    RW, RH = 1080, 1920
+    margin = 70
+
+    # Crop centrado para 9:16
+    src_w, src_h = bg.size
+    if src_w / src_h > RW / RH:
+        new_h, new_w = RH, int(src_w * RH / src_h)
+    else:
+        new_w, new_h = RW, int(src_h * RW / src_w)
+    img = bg.resize((new_w, new_h), Image.LANCZOS)
+    left, top = (new_w - RW) // 2, (new_h - RH) // 2
+    img = img.crop((left, top, left + RW, top + RH))
+
+    # Gradiente escuro na metade inferior
+    overlay = Image.new("RGBA", (RW, RH), (0, 0, 0, 0))
+    od = ImageDraw.Draw(overlay)
+    start_y = int(RH * 0.42)
+    for y in range(start_y, RH):
+        t = (y - start_y) / (RH - start_y)
+        od.line([(0, y), (RW, y)], fill=(0, 0, 0, int(210 * (t ** 0.6))))
+    img = img.convert("RGBA")
+    img.alpha_composite(overlay)
+    img = img.convert("RGB")
+    draw = ImageDraw.Draw(img)
+
+    # Título dourado (topic) — tamanho adaptativo
+    topic = post["topic"].upper()
+    for size in [115, 98, 84, 70, 58]:
+        f_title = _impact(size)
+        lines = _wrap(topic, f_title, draw, RW - 2 * margin)
+        if len(lines) <= 3:
+            break
+
+    line_h = draw.textbbox((0, 0), "A", font=f_title)[3] + 14
+    brand_y = RH - 105
+
+    # Subtítulo = primeiro item da lista
+    f_sub = _impact(52)
+    first_item = post["items"][0]["name"].upper() if post.get("items") else ""
+    sub_lines = _wrap(first_item, f_sub, draw, RW - 2 * margin) if first_item else []
+    sub_h = len(sub_lines) * (draw.textbbox((0, 0), "A", font=f_sub)[3] + 10) + 28 if sub_lines else 0
+
+    total_h = len(lines) * line_h + sub_h
+    y = brand_y - total_h - 60
+
+    for line in lines:
+        tw = draw.textbbox((0, 0), line, font=f_title)[2]
+        _centered_shadow(draw, y, line, f_title, fill=GOLD, shadow=6, W=RW)
+        y += line_h
+
+    if sub_lines:
+        y += 16
+        for line in sub_lines:
+            _centered_shadow(draw, y, line, f_sub, fill=WHITE, shadow=4, W=RW)
+            y += draw.textbbox((0, 0), "A", font=f_sub)[3] + 10
+
+    # Brand bar
+    bf = _regular(30)
+    full = "● POSITIVE PULSE ●"
+    tw = draw.textbbox((0, 0), full, font=bf)[2]
+    draw.rectangle([(margin, brand_y - 18), (RW - margin, brand_y - 16)], fill=GOLD)
+    _centered_shadow(draw, brand_y, full, bf, fill=GOLD, shadow=3, W=RW)
+
+    path = "reel_image.jpg"
+    img.save(path, "JPEG", quality=95)
+    log.info(f"Reel image saved -> {path}")
+    return path
+
+
+def send_reel_to_webhook(post: dict, image_url: str):
+    if not REEL_WEBHOOK_URL:
+        log.info("MAKE_REEL_WEBHOOK nao definido — reel nao enviado")
+        return
+    caption = f"{post['caption']}\n\n{' '.join(post['hashtags'])}"
+    r = requests.post(REEL_WEBHOOK_URL, json={"video_url": image_url, "caption": caption}, timeout=30)
+    r.raise_for_status()
+    log.info(f"Reel webhook OK: {r.status_code}")
+
+
 # ─── Main ─────────────────────────────────────────────────────────────────────
 
 def main():
@@ -399,18 +483,29 @@ def main():
         bg = fetch_photo(item["search"])
         slides_paths.append(create_item_slide(item, i, len(items), bg))
 
-    log.info(f"Fazendo upload de {len(slides_paths)} slides...")
-    urls = [upload_image(p) for p in slides_paths]
+    # Gerar imagem Reel com a foto do hero (reutiliza bg1, sem custo extra)
+    log.info("Gerando imagem Reel 9:16...")
+    reel_path = create_reel_image(post, bg1)
 
-    log.info("Enviando para Make.com...")
+    log.info(f"Fazendo upload de {len(slides_paths)} slides + reel...")
+    urls = [upload_image(p) for p in slides_paths]
+    reel_url = upload_image(reel_path)
+
+    log.info("Enviando carousel para Make.com...")
     try:
         send_to_webhook(post, urls)
     except Exception as e:
-        log.warning(f"Webhook falhou: {e}")
+        log.warning(f"Carousel webhook falhou: {e}")
         log.info(f"URLs: {urls}")
 
+    log.info("Enviando reel para Make.com...")
+    try:
+        send_reel_to_webhook(post, reel_url)
+    except Exception as e:
+        log.warning(f"Reel webhook falhou: {e}")
+
     save_log(post, urls)
-    log.info(f"=== Concluido! {len(slides_paths)} slides ===")
+    log.info(f"=== Concluido! {len(slides_paths)} slides + 1 reel ===")
 
 if __name__ == "__main__":
     main()
