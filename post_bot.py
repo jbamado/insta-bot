@@ -477,15 +477,24 @@ def main():
     bg1 = fetch_photo(post.get("search_term", "inspiring news world"))
     slides_paths.append(create_slide1(post, bg1))
 
-    # Slides 2-5 — uma foto por item
+    # Slides 2-6 — uma foto por item
+    bg_first_item = None
     for i, item in enumerate(items):
         log.info(f"Buscando foto para item {i+1}: {item['name']}...")
         bg = fetch_photo(item["search"])
+        if i == 0:
+            bg_first_item = bg  # guarda foto do 1º item para o Reel
         slides_paths.append(create_item_slide(item, i, len(items), bg))
 
-    # Gerar imagem Reel com a foto do hero (reutiliza bg1, sem custo extra)
+    # Gerar imagem Reel com a foto + conteúdo do 1º item (slide 2)
     log.info("Gerando imagem Reel 9:16...")
-    reel_path = create_reel_image(post, bg1)
+    reel_post = {
+        "topic": items[0]["name"],
+        "items": [{"name": items[0]["detail"]}],
+        "caption": post["caption"],
+        "hashtags": post["hashtags"],
+    }
+    reel_path = create_reel_image(reel_post, bg_first_item)
 
     log.info(f"Fazendo upload de {len(slides_paths)} slides + reel...")
     urls = [upload_image(p) for p in slides_paths]
