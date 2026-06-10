@@ -6,7 +6,7 @@ Slide 1 : Foto principal + headline dourada enorme
 Slides 2+: Uma foto por item + nome dourado + detalhe branco
 """
 
-import io, os, re, json, base64, logging, subprocess, xml.etree.ElementTree as ET
+import io, os, re, json, base64, logging, xml.etree.ElementTree as ET
 from datetime import datetime
 from pathlib import Path
 
@@ -19,8 +19,6 @@ ANTHROPIC_API_KEY   = os.getenv("ANTHROPIC_API_KEY", "")
 UNSPLASH_ACCESS_KEY = os.getenv("UNSPLASH_ACCESS_KEY", "XJWduaYYGKbMDEYFMfKa9EaGxcLN-_KkOlGPahK5x5A")
 IMGBB_API_KEY       = "44c06dbe6a657fdfd3ac4b3b97164db6"
 WEBHOOK_URL         = "https://hook.eu1.make.com/u3ci4y1uxw85edmxrd6li2qdjwu6mnst"
-REEL_WEBHOOK_URL    = os.getenv("MAKE_REEL_WEBHOOK", "")
-PIXABAY_API_KEY     = os.getenv("PIXABAY_API_KEY", "")
 LOG_FILE            = "publications.json"
 
 GOLD  = (255, 200,   0)
@@ -375,223 +373,6 @@ def save_log(post: dict, urls: list):
     path.write_text(json.dumps(history, indent=2, ensure_ascii=False), encoding="utf-8")
     log.info(f"Log -> {len(history)} publicacoes")
 
-# ─── 8. Gerar imagem Reel (9:16) com a foto do hero ──────────────────────────
-
-def create_reel_image(post: dict, bg: Image.Image) -> str:
-    """Gera imagem 1080x1920 para Reel reutilizando a foto do slide 1."""
-    RW, RH = 1080, 1920
-    margin = 70
-
-    # Crop centrado para 9:16
-    src_w, src_h = bg.size
-    if src_w / src_h > RW / RH:
-        new_h, new_w = RH, int(src_w * RH / src_h)
-    else:
-        new_w, new_h = RW, int(src_h * RW / src_w)
-    img = bg.resize((new_w, new_h), Image.LANCZOS)
-    left, top = (new_w - RW) // 2, (new_h - RH) // 2
-    img = img.crop((left, top, left + RW, top + RH))
-
-    # Gradiente escuro na metade inferior
-    overlay = Image.new("RGBA", (RW, RH), (0, 0, 0, 0))
-    od = ImageDraw.Draw(overlay)
-    start_y = int(RH * 0.42)
-    for y in range(start_y, RH):
-        t = (y - start_y) / (RH - start_y)
-        od.line([(0, y), (RW, y)], fill=(0, 0, 0, int(210 * (t ** 0.6))))
-    img = img.convert("RGBA")
-    img.alpha_composite(overlay)
-    img = img.convert("RGB")
-    draw = ImageDraw.Draw(img)
-
-    # Título dourado (topic) — tamanho adaptativo
-    topic = post["topic"].upper()
-    for size in [115, 98, 84, 70, 58]:
-        f_title = _impact(size)
-        lines = _wrap(topic, f_title, draw, RW - 2 * margin)
-        if len(lines) <= 3:
-            break
-
-    line_h = draw.textbbox((0, 0), "A", font=f_title)[3] + 14
-    brand_y = RH - 105
-
-    # Subtítulo = primeiro item da lista
-    f_sub = _impact(52)
-    first_item = post["items"][0]["name"].upper() if post.get("items") else ""
-    sub_lines = _wrap(first_item, f_sub, draw, RW - 2 * margin) if first_item else []
-    sub_h = len(sub_lines) * (draw.textbbox((0, 0), "A", font=f_sub)[3] + 10) + 28 if sub_lines else 0
-
-    total_h = len(lines) * line_h + sub_h
-    y = brand_y - total_h - 60
-
-    for line in lines:
-        tw = draw.textbbox((0, 0), line, font=f_title)[2]
-        _centered_shadow(draw, y, line, f_title, fill=GOLD, shadow=6, W=RW)
-        y += line_h
-
-    if sub_lines:
-        y += 16
-        for line in sub_lines:
-            _centered_shadow(draw, y, line, f_sub, fill=WHITE, shadow=4, W=RW)
-            y += draw.textbbox((0, 0), "A", font=f_sub)[3] + 10
-
-    # Brand bar
-    bf = _regular(30)
-    full = "● POSITIVE PULSE ●"
-    tw = draw.textbbox((0, 0), full, font=bf)[2]
-    draw.rectangle([(margin, brand_y - 18), (RW - margin, brand_y - 16)], fill=GOLD)
-    _centered_shadow(draw, brand_y, full, bf, fill=GOLD, shadow=3, W=RW)
-
-    path = "reel_image.jpg"
-    img.save(path, "JPEG", quality=95)
-    log.info(f"Reel image saved -> {path}")
-    return path
-
-
-# Temas de música por categoria — Pixabay queries
-MUSIC_THEMES = {
-    "Tech":        ["technology electronic", "digital innovation", "futuristic beats"],
-    "Science":     ["inspiring orchestral", "discovery cinematic", "epic science"],
-    "Environment": ["nature ambient", "peaceful earth", "inspiring nature"],
-    "Health":      ["uplifting motivational", "positive energy", "feel good"],
-    "Society":     ["inspiring uplifting", "hopeful cinematic", "positive news"],
-    "Animals":     ["nature peaceful", "happy uplifting", "gentle ambient"],
-    "default":     ["uplifting motivational", "inspiring cinematic", "epic background"],
-}
-
-
-def fetch_pixabay_music(category: str = "default") -> str | None:
-    """Descarrega música do Pixabay por categoria. Retorna path do MP3 ou None."""
-    if not PIXABAY_API_KEY:
-        log.warning("PIXABAY_API_KEY nao definida — reel sem musica")
-        return None
-
-    queries = MUSIC_THEMES.get(category, MUSIC_THEMES["default"])
-    import random
-    random.shuffle(queries)
-
-    for query in queries:
-        try:
-            r = requests.get(
-                "https://pixabay.com/api/music/",
-                params={
-                    "key": PIXABAY_API_KEY,
-                    "q": query,
-                    "per_page": 10,
-                },
-                timeout=15,
-            )
-            hits = r.json().get("hits", [])
-            if not hits:
-                continue
-            # Escolhe uma música aleatória dos resultados
-            random.shuffle(hits)
-            for hit in hits[:5]:
-                audio_url = hit.get("audio", {}).get("url") or hit.get("musicUrl") or hit.get("previewURL")
-                if not audio_url:
-                    # tentar campo alternativo
-                    audio_url = hit.get("url")
-                if audio_url and audio_url.endswith(".mp3"):
-                    log.info(f"Musica Pixabay: {hit.get('title', query)} ({audio_url})")
-                    music_path = "reel_music.mp3"
-                    dl = requests.get(audio_url, timeout=60)
-                    dl.raise_for_status()
-                    with open(music_path, "wb") as f:
-                        f.write(dl.content)
-                    size_kb = os.path.getsize(music_path) // 1024
-                    log.info(f"Musica guardada: {music_path} ({size_kb} KB)")
-                    return music_path
-        except Exception as e:
-            log.warning(f"Pixabay music '{query}': {e}")
-
-    log.warning("Nao foi possivel obter musica do Pixabay")
-    return None
-
-
-def image_to_reel_video(image_path: str, music_path: str | None = None,
-                        output_path: str = "reel_video.mp4", duration: int = 7):
-    """Converte imagem JPEG num vídeo MP4 com música, compatível com Instagram Reels."""
-
-    video_filter = (
-        "scale=1080:1920:force_original_aspect_ratio=decrease,"
-        "pad=1080:1920:(ow-iw)/2:(oh-ih)/2,setsar=1"
-    )
-
-    if music_path and os.path.exists(music_path):
-        # Com música: fade-in 0.5s, fade-out 1.5s, volume 80%
-        audio_filter = (
-            f"afade=t=in:st=0:d=0.5,"
-            f"afade=t=out:st={duration - 1.5}:d=1.5,"
-            f"volume=0.8"
-        )
-        cmd = [
-            "ffmpeg", "-y",
-            "-loop", "1", "-i", image_path,
-            "-i", music_path,
-            "-t", str(duration),
-            "-vf", video_filter,
-            "-af", audio_filter,
-            "-c:v", "libx264", "-preset", "fast", "-crf", "18",
-            "-c:a", "aac", "-b:a", "128k",
-            "-pix_fmt", "yuv420p",
-            "-movflags", "+faststart",
-            "-r", "30",
-            "-shortest",
-            output_path,
-        ]
-        log.info("Gerando reel video com musica...")
-    else:
-        cmd = [
-            "ffmpeg", "-y",
-            "-loop", "1", "-i", image_path,
-            "-t", str(duration),
-            "-vf", video_filter,
-            "-c:v", "libx264", "-preset", "fast", "-crf", "18",
-            "-pix_fmt", "yuv420p",
-            "-movflags", "+faststart",
-            "-r", "30",
-            "-an",
-            output_path,
-        ]
-        log.info("Gerando reel video sem musica...")
-
-    result = subprocess.run(cmd, capture_output=True, text=True)
-    if result.returncode != 0:
-        log.error(f"FFmpeg erro: {result.stderr[-1000:]}")
-        raise RuntimeError("FFmpeg falhou ao converter imagem em video")
-
-    size_mb = os.path.getsize(output_path) / 1e6
-    log.info(f"Reel video gerado: {output_path} ({size_mb:.1f} MB)")
-    return output_path
-
-
-def upload_video_for_reel(video_path: str) -> str:
-    """Faz upload do vídeo para litterbox.catbox.moe (72h) — URL público para Instagram."""
-    log.info("Uploading reel video para litterbox.catbox.moe...")
-    with open(video_path, "rb") as f:
-        r = requests.post(
-            "https://litterbox.catbox.moe/resources/internals/api.php",
-            data={"reqtype": "fileupload", "time": "72h"},
-            files={"fileToUpload": ("reel.mp4", f, "video/mp4")},
-            timeout=300,
-        )
-    url = r.text.strip()
-    if url.startswith("https://"):
-        log.info(f"Reel video URL: {url}")
-        return url
-    raise RuntimeError(f"Upload falhou: {r.text[:200]}")
-
-
-def send_reel_to_webhook(post: dict, image_url: str):
-    if not REEL_WEBHOOK_URL:
-        log.info("MAKE_REEL_WEBHOOK nao definido — reel nao enviado")
-        return
-    caption = f"{post['caption']}\n\n{' '.join(post['hashtags'])}"
-    r = requests.post(REEL_WEBHOOK_URL, json={"video_url": image_url, "caption": caption}, timeout=30)
-    r.raise_for_status()
-    log.info(f"Reel webhook OK: {r.status_code}")
-
-
 # ─── Main ─────────────────────────────────────────────────────────────────────
 
 def main():
@@ -612,62 +393,24 @@ def main():
     bg1 = fetch_photo(post.get("search_term", "inspiring news world"))
     slides_paths.append(create_slide1(post, bg1))
 
-    # Slides 2-6 — uma foto por item
-    bg_first_item = None
+    # Slides 2-5 — uma foto por item
     for i, item in enumerate(items):
         log.info(f"Buscando foto para item {i+1}: {item['name']}...")
         bg = fetch_photo(item["search"])
-        if i == 0:
-            bg_first_item = bg  # guarda foto do 1º item para o Reel
         slides_paths.append(create_item_slide(item, i, len(items), bg))
 
-    # Gerar imagem Reel com a foto + conteúdo do 1º item (slide 2)
-    log.info("Gerando imagem Reel 9:16...")
-    reel_post = {
-        "topic": items[0]["name"],
-        "items": [{"name": items[0]["detail"]}],
-        "caption": post["caption"],
-        "hashtags": post["hashtags"],
-    }
-    reel_path = create_reel_image(reel_post, bg_first_item)
-
-    log.info(f"Fazendo upload de {len(slides_paths)} slides + reel...")
+    log.info(f"Fazendo upload de {len(slides_paths)} slides...")
     urls = [upload_image(p) for p in slides_paths]
-    reel_url = upload_image(reel_path)
 
-    log.info("Enviando carousel para Make.com...")
+    log.info("Enviando para Make.com...")
     try:
         send_to_webhook(post, urls)
     except Exception as e:
-        log.warning(f"Carousel webhook falhou: {e}")
+        log.warning(f"Webhook falhou: {e}")
         log.info(f"URLs: {urls}")
 
-    log.info("Convertendo imagem reel em video MP4 com musica...")
-    try:
-        # Determinar categoria pelo topic (Tech é o default para este bot)
-        topic_lower = post["topic"].lower()
-        if any(w in topic_lower for w in ["tech", "ai", "robot", "chip", "digital", "cyber"]):
-            music_category = "Tech"
-        elif any(w in topic_lower for w in ["science", "space", "discover"]):
-            music_category = "Science"
-        elif any(w in topic_lower for w in ["nature", "planet", "ocean", "green", "environment"]):
-            music_category = "Environment"
-        elif any(w in topic_lower for w in ["health", "medical", "brain", "body"]):
-            music_category = "Health"
-        else:
-            music_category = "default"
-
-        log.info(f"Categoria musica: {music_category}")
-        music_path = fetch_pixabay_music(music_category)
-        reel_video_path = image_to_reel_video(reel_path, music_path=music_path)
-        reel_video_url  = upload_video_for_reel(reel_video_path)
-        log.info("Enviando reel para Make.com...")
-        send_reel_to_webhook(post, reel_video_url)
-    except Exception as e:
-        log.warning(f"Reel falhou: {e}")
-
     save_log(post, urls)
-    log.info(f"=== Concluido! {len(slides_paths)} slides + 1 reel ===")
+    log.info(f"=== Concluido! {len(slides_paths)} slides ===")
 
 if __name__ == "__main__":
     main()
