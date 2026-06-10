@@ -6,7 +6,7 @@ Slide 1 : Foto principal + headline dourada enorme
 Slides 2+: Uma foto por item + nome dourado + detalhe branco
 """
 
-import io, os, re, json, base64, logging, xml.etree.ElementTree as ET
+import io, os, re, json, base64, logging, subprocess, xml.etree.ElementTree as ET
 from datetime import datetime
 from pathlib import Path
 
@@ -447,6 +447,49 @@ def create_reel_image(post: dict, bg: Image.Image) -> str:
     return path
 
 
+def image_to_reel_video(image_path: str, output_path: str = "reel_video.mp4", duration: int = 6):
+    """Converte imagem JPEG num vídeo MP4 de 6s compatível com Instagram Reels."""
+    cmd = [
+        "ffmpeg", "-y",
+        "-loop", "1",
+        "-i", image_path,
+        "-t", str(duration),
+        "-vf", "scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2,setsar=1",
+        "-c:v", "libx264",
+        "-preset", "fast",
+        "-crf", "18",
+        "-pix_fmt", "yuv420p",
+        "-movflags", "+faststart",
+        "-r", "30",
+        "-an",          # sem áudio (Reels aceita sem áudio)
+        output_path
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        log.error(f"FFmpeg erro: {result.stderr[-1000:]}")
+        raise RuntimeError("FFmpeg falhou ao converter imagem em video")
+    size_mb = os.path.getsize(output_path) / 1e6
+    log.info(f"Reel video gerado: {output_path} ({size_mb:.1f} MB)")
+    return output_path
+
+
+def upload_video_for_reel(video_path: str) -> str:
+    """Faz upload do vídeo para litterbox.catbox.moe (72h) — URL público para Instagram."""
+    log.info("Uploading reel video para litterbox.catbox.moe...")
+    with open(video_path, "rb") as f:
+        r = requests.post(
+            "https://litterbox.catbox.moe/resources/internals/api.php",
+            data={"reqtype": "fileupload", "time": "72h"},
+            files={"fileToUpload": ("reel.mp4", f, "video/mp4")},
+            timeout=300,
+        )
+    url = r.text.strip()
+    if url.startswith("https://"):
+        log.info(f"Reel video URL: {url}")
+        return url
+    raise RuntimeError(f"Upload falhou: {r.text[:200]}")
+
+
 def send_reel_to_webhook(post: dict, image_url: str):
     if not REEL_WEBHOOK_URL:
         log.info("MAKE_REEL_WEBHOOK nao definido — reel nao enviado")
@@ -507,11 +550,14 @@ def main():
         log.warning(f"Carousel webhook falhou: {e}")
         log.info(f"URLs: {urls}")
 
-    log.info("Enviando reel para Make.com...")
+    log.info("Convertendo imagem reel em video MP4...")
     try:
-        send_reel_to_webhook(post, reel_url)
+        reel_video_path = image_to_reel_video(reel_path)
+        reel_video_url  = upload_video_for_reel(reel_video_path)
+        log.info("Enviando reel para Make.com...")
+        send_reel_to_webhook(post, reel_video_url)
     except Exception as e:
-        log.warning(f"Reel webhook falhou: {e}")
+        log.warning(f"Reel falhou: {e}")
 
     save_log(post, urls)
     log.info(f"=== Concluido! {len(slides_paths)} slides + 1 reel ===")
