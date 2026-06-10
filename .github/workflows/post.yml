@@ -32,4 +32,5 @@ jobs:
           ANTHROPIC_API_KEY:   ${{ secrets.ANTHROPIC_API_KEY }}
           UNSPLASH_ACCESS_KEY: ${{ secrets.UNSPLASH_ACCESS_KEY }}
           MAKE_REEL_WEBHOOK:   ${{ secrets.MAKE_REEL_WEBHOOK }}
+          PIXABAY_API_KEY:     ${{ secrets.PIXABAY_API_KEY }}
         run: python post_bot.py

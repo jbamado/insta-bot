@@ -20,6 +20,7 @@ UNSPLASH_ACCESS_KEY = os.getenv("UNSPLASH_ACCESS_KEY", "XJWduaYYGKbMDEYFMfKa9EaG
 IMGBB_API_KEY       = "44c06dbe6a657fdfd3ac4b3b97164db6"
 WEBHOOK_URL         = "https://hook.eu1.make.com/u3ci4y1uxw85edmxrd6li2qdjwu6mnst"
 REEL_WEBHOOK_URL    = os.getenv("MAKE_REEL_WEBHOOK", "")
+PIXABAY_API_KEY     = os.getenv("PIXABAY_API_KEY", "")
 LOG_FILE            = "publications.json"
 
 GOLD  = (255, 200,   0)
@@ -447,27 +448,118 @@ def create_reel_image(post: dict, bg: Image.Image) -> str:
     return path
 
 
-def image_to_reel_video(image_path: str, output_path: str = "reel_video.mp4", duration: int = 6):
-    """Converte imagem JPEG num vídeo MP4 de 6s compatível com Instagram Reels."""
-    cmd = [
-        "ffmpeg", "-y",
-        "-loop", "1",
-        "-i", image_path,
-        "-t", str(duration),
-        "-vf", "scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2,setsar=1",
-        "-c:v", "libx264",
-        "-preset", "fast",
-        "-crf", "18",
-        "-pix_fmt", "yuv420p",
-        "-movflags", "+faststart",
-        "-r", "30",
-        "-an",          # sem áudio (Reels aceita sem áudio)
-        output_path
-    ]
+# Temas de música por categoria — Pixabay queries
+MUSIC_THEMES = {
+    "Tech":        ["technology electronic", "digital innovation", "futuristic beats"],
+    "Science":     ["inspiring orchestral", "discovery cinematic", "epic science"],
+    "Environment": ["nature ambient", "peaceful earth", "inspiring nature"],
+    "Health":      ["uplifting motivational", "positive energy", "feel good"],
+    "Society":     ["inspiring uplifting", "hopeful cinematic", "positive news"],
+    "Animals":     ["nature peaceful", "happy uplifting", "gentle ambient"],
+    "default":     ["uplifting motivational", "inspiring cinematic", "epic background"],
+}
+
+
+def fetch_pixabay_music(category: str = "default") -> str | None:
+    """Descarrega música do Pixabay por categoria. Retorna path do MP3 ou None."""
+    if not PIXABAY_API_KEY:
+        log.warning("PIXABAY_API_KEY nao definida — reel sem musica")
+        return None
+
+    queries = MUSIC_THEMES.get(category, MUSIC_THEMES["default"])
+    import random
+    random.shuffle(queries)
+
+    for query in queries:
+        try:
+            r = requests.get(
+                "https://pixabay.com/api/music/",
+                params={
+                    "key": PIXABAY_API_KEY,
+                    "q": query,
+                    "per_page": 10,
+                },
+                timeout=15,
+            )
+            hits = r.json().get("hits", [])
+            if not hits:
+                continue
+            # Escolhe uma música aleatória dos resultados
+            random.shuffle(hits)
+            for hit in hits[:5]:
+                audio_url = hit.get("audio", {}).get("url") or hit.get("musicUrl") or hit.get("previewURL")
+                if not audio_url:
+                    # tentar campo alternativo
+                    audio_url = hit.get("url")
+                if audio_url and audio_url.endswith(".mp3"):
+                    log.info(f"Musica Pixabay: {hit.get('title', query)} ({audio_url})")
+                    music_path = "reel_music.mp3"
+                    dl = requests.get(audio_url, timeout=60)
+                    dl.raise_for_status()
+                    with open(music_path, "wb") as f:
+                        f.write(dl.content)
+                    size_kb = os.path.getsize(music_path) // 1024
+                    log.info(f"Musica guardada: {music_path} ({size_kb} KB)")
+                    return music_path
+        except Exception as e:
+            log.warning(f"Pixabay music '{query}': {e}")
+
+    log.warning("Nao foi possivel obter musica do Pixabay")
+    return None
+
+
+def image_to_reel_video(image_path: str, music_path: str | None = None,
+                        output_path: str = "reel_video.mp4", duration: int = 7):
+    """Converte imagem JPEG num vídeo MP4 com música, compatível com Instagram Reels."""
+
+    video_filter = (
+        "scale=1080:1920:force_original_aspect_ratio=decrease,"
+        "pad=1080:1920:(ow-iw)/2:(oh-ih)/2,setsar=1"
+    )
+
+    if music_path and os.path.exists(music_path):
+        # Com música: fade-in 0.5s, fade-out 1.5s, volume 80%
+        audio_filter = (
+            f"afade=t=in:st=0:d=0.5,"
+            f"afade=t=out:st={duration - 1.5}:d=1.5,"
+            f"volume=0.8"
+        )
+        cmd = [
+            "ffmpeg", "-y",
+            "-loop", "1", "-i", image_path,
+            "-i", music_path,
+            "-t", str(duration),
+            "-vf", video_filter,
+            "-af", audio_filter,
+            "-c:v", "libx264", "-preset", "fast", "-crf", "18",
+            "-c:a", "aac", "-b:a", "128k",
+            "-pix_fmt", "yuv420p",
+            "-movflags", "+faststart",
+            "-r", "30",
+            "-shortest",
+            output_path,
+        ]
+        log.info("Gerando reel video com musica...")
+    else:
+        cmd = [
+            "ffmpeg", "-y",
+            "-loop", "1", "-i", image_path,
+            "-t", str(duration),
+            "-vf", video_filter,
+            "-c:v", "libx264", "-preset", "fast", "-crf", "18",
+            "-pix_fmt", "yuv420p",
+            "-movflags", "+faststart",
+            "-r", "30",
+            "-an",
+            output_path,
+        ]
+        log.info("Gerando reel video sem musica...")
+
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
         log.error(f"FFmpeg erro: {result.stderr[-1000:]}")
         raise RuntimeError("FFmpeg falhou ao converter imagem em video")
+
     size_mb = os.path.getsize(output_path) / 1e6
     log.info(f"Reel video gerado: {output_path} ({size_mb:.1f} MB)")
     return output_path
@@ -550,9 +642,24 @@ def main():
         log.warning(f"Carousel webhook falhou: {e}")
         log.info(f"URLs: {urls}")
 
-    log.info("Convertendo imagem reel em video MP4...")
+    log.info("Convertendo imagem reel em video MP4 com musica...")
     try:
-        reel_video_path = image_to_reel_video(reel_path)
+        # Determinar categoria pelo topic (Tech é o default para este bot)
+        topic_lower = post["topic"].lower()
+        if any(w in topic_lower for w in ["tech", "ai", "robot", "chip", "digital", "cyber"]):
+            music_category = "Tech"
+        elif any(w in topic_lower for w in ["science", "space", "discover"]):
+            music_category = "Science"
+        elif any(w in topic_lower for w in ["nature", "planet", "ocean", "green", "environment"]):
+            music_category = "Environment"
+        elif any(w in topic_lower for w in ["health", "medical", "brain", "body"]):
+            music_category = "Health"
+        else:
+            music_category = "default"
+
+        log.info(f"Categoria musica: {music_category}")
+        music_path = fetch_pixabay_music(music_category)
+        reel_video_path = image_to_reel_video(reel_path, music_path=music_path)
         reel_video_url  = upload_video_for_reel(reel_video_path)
         log.info("Enviando reel para Make.com...")
         send_reel_to_webhook(post, reel_video_url)
